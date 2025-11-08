@@ -1,0 +1,37 @@
+version: "1"
+
+project:
+  name: u4s-chat
+  description: "U4S — чат-помощник (YandexGPT + Vector Store), FastAPI на Amvera"
+
+services:
+  api:
+    runtime: docker
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - 8000
+    env:
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID}
+      VECTOR_STORE_ID: ${VECTOR_STORE_ID}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+    secrets:
+      - YANDEX_API_KEY
+    healthcheck:
+      path: /health
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    resources:
+      cpu: "0.5"
+      memory: "512Mi"
+    domains:
+      - host: YOUR_DOMAIN_HERE            # например: api.usadba4.ru
+        paths:
+          - path: /
+            port: 8000
+            protocol: http
+
+secrets:
+  - name: YANDEX_API_KEY
