@@ -52,11 +52,33 @@ def yc_openai_headers():
         "Content-Type": "application/json",
     }
 
+def format_http_error(resp: requests.Response) -> str:
+    """Возвращает укороченный текст ошибки от API для логов."""
+    body: str
+    try:
+        data = resp.json()
+        body = json.dumps(data, ensure_ascii=False)
+    except (ValueError, json.JSONDecodeError):
+        body = resp.text or ""
+    body = body.strip().replace("\n", " ")
+    if len(body) > 800:
+        body = body[:800] + "…"
+    return body or "<пустой ответ>"
+
+
+def ensure_ok(resp: requests.Response, label: str) -> None:
+    """Бросает подробную ошибку, если HTTP-ответ не 2xx."""
+    if resp.ok:
+        return
+    details = format_http_error(resp)
+    raise RuntimeError(f"{label} HTTP {resp.status_code}: {details}")
+
+
 def vs_list_files():
     """Список файлов в Vector Store (для диагностики и фолбэка)."""
     url = f"{FILES_API}/vector_stores/{VECTOR_STORE_ID}/files"
     r = requests.get(url, headers=yc_json_headers(), timeout=30)
-    r.raise_for_status()
+    ensure_ok(r, "Vector Store list")
     return r.json().get("data", [])
 
 # ========================
@@ -83,7 +105,7 @@ def rag_via_responses(question: str) -> str:
         "max_output_tokens": 600,
     }
     r = requests.post(RESPONSES_API, headers=yc_json_headers(), json=payload, timeout=60)
-    r.raise_for_status()
+    ensure_ok(r, "Responses API")
     data = r.json()
 
     # Прямой текст (некоторые версии API возвращают field output_text)
@@ -114,8 +136,17 @@ def build_context_from_vs() -> str:
         files = vs_list_files()
         for f in files:
             fid = f["id"]
-            meta = requests.get(f"{FILES_API}/files/{fid}", headers=yc_json_headers(), timeout=30).json()
-            text = requests.get(f"{FILES_API}/files/{fid}/content", headers=yc_json_headers(), timeout=30).text
+            meta_resp = requests.get(
+                f"{FILES_API}/files/{fid}", headers=yc_json_headers(), timeout=30
+            )
+            ensure_ok(meta_resp, "Vector Store file meta")
+            meta = meta_resp.json()
+
+            text_resp = requests.get(
+                f"{FILES_API}/files/{fid}/content", headers=yc_json_headers(), timeout=30
+            )
+            ensure_ok(text_resp, "Vector Store file content")
+            text = text_resp.text
             lines = [ln for ln in text.splitlines() if any(k in ln.lower() for k in KEYS_FOR_CONTEXT)]
             if lines:
                 snips.append(f"### {meta.get('filename','file')}\n" + "\n".join(lines))
@@ -142,7 +173,7 @@ def ask_with_vs_context(question: str) -> str:
         "max_tokens": 600,
     }
     r = requests.post(COMPL_API, headers=yc_openai_headers(), json=payload, timeout=60)
-    r.raise_for_status()
+    ensure_ok(r, "Completions API")
     return r.json()["choices"][0]["message"]["content"]
 
 # ========================
