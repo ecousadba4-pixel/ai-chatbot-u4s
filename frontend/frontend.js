@@ -1,5 +1,5 @@
 (function(){
-  const FN_URL = "https://ai-chatbot-u4s-karinausadba.amvera.io"; // ← твоя функция
+  const FN_URL = "https://ai-chatbot-u4s-karinausadba.amvera.io/api/chat"; // ← эндпоинт FastAPI
 
   const $fab = document.getElementById('u4s-fab');
   const $chat = document.getElementById('u4s-chat');
