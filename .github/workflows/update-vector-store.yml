@@ -2,7 +2,7 @@ name: Update Vector Store from kb.jsonl
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
       - "kb.jsonl"
       - ".github/workflows/update-vector-store.yml"
@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: vector-store-${{ github.ref }}
+  group: "vector-store-${{ github.ref }}"
   cancel-in-progress: true
 
 jobs:
@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      KB_PATH: kb.jsonl
-      YANDEX_FOLDER_ID: b1g2vuvi3is4jn4eamo0
-      VECTOR_STORE_ID: ${{ secrets.VECTOR_STORE_ID }}
-      YANDEX_API_KEY: ${{ secrets.YANDEX_API_KEY }}
+      KB_PATH: "kb.jsonl"
+      YANDEX_FOLDER_ID: "b1g2vuvi3is4jn4eamo0"
+      VECTOR_STORE_ID: "${{ secrets.VECTOR_STORE_ID }}"
+      YANDEX_API_KEY: "${{ secrets.YANDEX_API_KEY }}"
 
     steps:
       - name: Checkout repo
@@ -34,7 +34,7 @@ jobs:
         run: |
           pwd
           ls -la
-          echo "KB_PATH=$KB_PATH"
+          echo "KB_PATH=${KB_PATH}"
 
       - name: Ensure kb.jsonl exists and is non-empty
         run: |
@@ -42,21 +42,21 @@ jobs:
 
       - name: Basic JSONL validation
         run: |
-          python - << 'PY'
+          python - <<'PY'
           import json, sys
           ok = True
           with open("kb.jsonl","r",encoding="utf-8") as f:
-            for i,line in enumerate(f,1):
-              if not line.strip():
-                continue
-              try:
-                o=json.loads(line)
-              except Exception as e:
-                print(f"Invalid JSON at line {i}: {e}", file=sys.stderr); ok=False; break
-              for k in ("id","title","text","metadata"):
-                if k not in o:
-                  print(f"Missing '{k}' at line {i}", file=sys.stderr); ok=False; break
-              if not ok: break
+              for i,line in enumerate(f,1):
+                  if not line.strip():
+                      continue
+                  try:
+                      o=json.loads(line)
+                  except Exception as e:
+                      print(f"Invalid JSON at line {i}: {e}", file=sys.stderr); ok=False; break
+                  for k in ("id","title","text","metadata"):
+                      if k not in o:
+                          print(f"Missing '{k}' at line {i}", file=sys.stderr); ok=False; break
+                  if not ok: break
           sys.exit(0 if ok else 2)
           PY
 
@@ -83,7 +83,7 @@ jobs:
         if: success()
         run: |
           SYNC_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
-          echo "🕓 Last KB Sync: ${SYNC_DATE}" | tee -a $GITHUB_STEP_SUMMARY
+          echo "🕓 Last KB Sync: ${SYNC_DATE}" | tee -a "$GITHUB_STEP_SUMMARY"
           if grep -q "Last KB Sync:" README.md; then
             sed -i "s|🕓 Last KB Sync: .*|🕓 Last KB Sync: ${SYNC_DATE}|" README.md
           else
@@ -94,4 +94,5 @@ jobs:
           git add README.md
           git commit -m "docs: update last KB sync date (${SYNC_DATE})" || echo "no changes to commit"
           git push
+
 
