@@ -1,0 +1,73 @@
+name: Deploy frontend to GitHub Pages (minify + cache-bust)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'frontend/**'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set build version (UTC timestamp + short SHA)
+        run: echo "VERSION=$(date -u +'%Y%m%d%H%M%S')-${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install minifiers
+        run: npm i -g html-minifier-terser clean-css-cli terser
+
+      - name: Build (minify + emit version.json)
+        run: |
+          mkdir -p dist
+          # HTML
+          npx html-minifier-terser \
+            --collapse-whitespace --remove-comments \
+            --minify-css true --minify-js true \
+            frontend/frontend.html -o dist/frontend.html
+
+          # CSS
+          npx clean-css-cli -o dist/frontend.css frontend/frontend.css
+
+          # JS
+          npx terser frontend/frontend.js -o dist/frontend.js -c -m
+
+          # LOADER
+          npx html-minifier-terser \
+            --collapse-whitespace --remove-comments \
+            --minify-js true \
+            frontend/loader.html -o dist/loader.html
+
+          # Версия для cache-bust
+          echo "{\"version\":\"$VERSION\"}" > dist/version.json
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
