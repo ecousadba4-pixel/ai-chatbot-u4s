@@ -5,4 +5,4 @@
 RAG-чат-бот для Усадьбы Четыре Сезона.  
 Автоматическое обновление базы знаний (`kb.jsonl`) → Yandex AI Studio Vector Store.
 
-Last KB Sync: 2025-11-08 14:08 UTC
+Last KB Sync: 2025-11-08 14:23 UTC
