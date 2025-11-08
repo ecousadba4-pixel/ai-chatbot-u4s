@@ -39,7 +39,8 @@
 {"id":"faq.only_for_guests","title":"Можно прийти в ресторан/СПА/баню без проживания?","text":"Нет. Услуги предназначены только для проживающих гостей.","metadata":{"type":"faq","entity":"access","links":["ops.only_for_guests"]}}
 {"id":"faq.cancellation.5days","title":"Отмена за 3–5 дней до заезда","text":"В обычные даты отмена поздняя — предоплата не возвращается. В праздники действуют более строгие сроки.","metadata":{"type":"faq","entity":"booking","links":["policy.cancellation"]}}
 {"id":"faq.checkin.checkout","title":"Заезд и выезд","text":"Заезд с 15:00, выезд до 12:00. Ранний/поздний — по согласованию и доступности.","metadata":{"type":"faq","entity":"reception","links":["room.rules.checkin_checkout"]}}
-{"id":"faq.contact.booking","title":"Как связаться по бронированию?","text":"Позвоните или напишите в WhatsApp: +7 (925) 55-33-700, ежедневно 09:00–21:00.","metadata":{"type":"faq","entity":"contact","links":["contact.booking.phone"]}}
+{"id":"faq.contact.booking","title":"Как связаться по бронированию?","text":"Позвоните или напишите в WhatsApp: +7 (925) 55-33-700, ежедневно 09:00–21:00.","metadata":{"type":"faq","entity":"contact","links":["contact.booking.phone"]}} 
+
 
 
 
