@@ -307,34 +307,33 @@ def rag_via_responses(question: str) -> str:
 #  Фолбэк: контекст из Vector Store
 # ========================
 
-PRIMARY_KEYS = [
-    "ресторан «калина красная»",
-    'ресторан "калина красная"',
-    "ресторан калинка красная",
-    "ресторан",
-    "часы работы",
-    "работает ежедневно",
-    "телефон ресторана",
-    "онлайн-заказ",
-    "ссылка",
-    "доставка",
-]
-SECONDARY_KEYS = ["кафе", "завтрак", "завтраки", "меню", "кухня"]
-ALL_KEYS = tuple({*PRIMARY_KEYS, *SECONDARY_KEYS})
+TOKEN_SPLIT_RE = re.compile(r"[^0-9a-zA-Zа-яА-ЯёЁ]+")
 
 
-def _should_skip_breakfast(question: str) -> bool:
-    lower_question = question.lower()
-    return "завтрак" not in lower_question and "завтраки" not in lower_question
+def _extract_keywords(text: str) -> set[str]:
+    """Возвращает множество слов длиной от 3 символов из переданного текста."""
+
+    tokens = [
+        token
+        for token in TOKEN_SPLIT_RE.split(text.lower())
+        if len(token) >= 3
+    ]
+    return set(tokens)
 
 
-def _score_line(line: str) -> int:
-    lower_line = line.lower()
-    if any(key in lower_line for key in PRIMARY_KEYS):
-        return 0
-    if any(key in lower_line for key in SECONDARY_KEYS):
-        return 1
-    return 2
+def _score_line(line: str, *, keywords: set[str], index: int) -> tuple[int, int, str]:
+    line_text = line.strip()
+    if not line_text:
+        return (1, index, "")
+
+    if keywords:
+        line_keywords = _extract_keywords(line)
+        match_count = len(line_keywords & keywords)
+        if match_count == 0:
+            return (1, index, "")
+        return (-match_count, index, line_text)
+
+    return (0, index, line_text)
 
 
 def build_context_from_vector_store(question: str) -> str:
@@ -342,7 +341,7 @@ def build_context_from_vector_store(question: str) -> str:
         return "Контекст пуст."
 
     try:
-        exclude_breakfast = _should_skip_breakfast(question)
+        keywords = _extract_keywords(question)
         snippets: list[str] = []
         total_chars = 0
 
@@ -354,20 +353,26 @@ def build_context_from_vector_store(question: str) -> str:
             meta, content = VECTOR_STORE.fetch_file(file_id)
             lines = content.splitlines()
 
-            hits = []
-            for raw_line in lines:
-                lower_line = raw_line.lower()
-                if not any(key in lower_line for key in ALL_KEYS):
-                    continue
-                if exclude_breakfast and ("завтрак" in lower_line or "завтраки" in lower_line):
-                    continue
-                hits.append(raw_line.strip())
+            scored_hits: list[tuple[int, int, str]] = []
+            for index, raw_line in enumerate(lines):
+                score = _score_line(raw_line, keywords=keywords, index=index)
+                if score[2]:
+                    scored_hits.append(score)
 
-            if not hits:
+            if keywords and not scored_hits:
+                for index, raw_line in enumerate(lines):
+                    line_text = raw_line.strip()
+                    if not line_text:
+                        continue
+                    scored_hits.append((0, index, line_text))
+                    if len(scored_hits) >= CONFIG.context_per_file_limit:
+                        break
+
+            if not scored_hits:
                 continue
 
-            hits.sort(key=_score_line)
-            top_hits = hits[: CONFIG.context_per_file_limit]
+            scored_hits.sort()
+            top_hits = [text for _, _, text in scored_hits[: CONFIG.context_per_file_limit]]
             filename = meta.get("filename") if isinstance(meta, dict) else None
             header = f"### {filename or 'file'}"
             block = "\n".join([header, *top_hits])
