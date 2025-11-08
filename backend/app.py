@@ -18,7 +18,10 @@ RESPONSES_API = f"{FILES_API}/responses"
 COMPL_API     = "https://llm.api.cloud.yandex.net/v1/chat/completions"
 
 # Разрешённые домены для CORS
-ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
+raw_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
+ALLOWED_ORIGINS = [o for o in raw_origins if o]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = ["*"]
 
 # ========================
 #  Приложение FastAPI
