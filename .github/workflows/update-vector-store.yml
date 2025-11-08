@@ -2,68 +2,50 @@ name: Update Vector Store from kb.jsonl
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
     paths:
       - "kb.jsonl"
-      - ".github/workflows/update-vector-store.yml"
       - "scripts/refresh_vector_store_files.py"
-  workflow_dispatch: {}
+      - ".github/workflows/update-vector-store.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: vector-store-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  validate-and-update:
+  update:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show workspace tree
-        run: |
-          pwd
-          ls -la
+      - name: Verify kb.jsonl exists
+        run: test -s kb.jsonl
 
-      - name: Ensure kb.jsonl exists and is non-empty
-        run: test -s "kb.jsonl"
-
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
         run: |
-          python -V
           pip install --upgrade pip
           pip install openai
 
-      - name: Basic JSONL validation
-        run: |
-          python -c "import json,sys; f=open('kb.jsonl','r',encoding='utf-8'); i=0; \
-for line in f: i+=1; s=line.strip(); \
-  (None if s=='' else json.loads(s)); \
-print('OK lines:', i)"
-
-      - name: Soft-refresh Yandex AI Studio Vector Store
+      - name: Refresh Vector Store
         env:
           YANDEX_API_KEY: ${{ secrets.YANDEX_API_KEY }}
           VECTOR_STORE_ID: ${{ secrets.VECTOR_STORE_ID }}
           YANDEX_FOLDER_ID: b1g2vuvi3is4jn4eamo0
         run: |
           python scripts/refresh_vector_store_files.py \
-            --vs-id "${VECTOR_STORE_ID}" \
+            --vs-id "$VECTOR_STORE_ID" \
             --kb "kb.jsonl" \
-            --folder-id "${YANDEX_FOLDER_ID}" \
+            --folder-id "$YANDEX_FOLDER_ID" \
             --timeout 900
 
-      - name: Update README with last sync date
-        if: success()
+      - name: Update README timestamp
         run: |
           SYNC_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
           echo "Last KB Sync: ${SYNC_DATE}" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -75,5 +57,6 @@ print('OK lines:', i)"
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions"
           git add README.md
-          git commit -m "docs: update last KB sync date (${SYNC_DATE})" || echo "no changes to commit"
+          git commit -m "docs: update last KB sync date (${SYNC_DATE})" || true
           git push
+
