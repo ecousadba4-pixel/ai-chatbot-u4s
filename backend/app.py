@@ -38,6 +38,18 @@ def parse_allowed_origins(raw: str) -> List[str]:
 
 ALLOWED_ORIGINS = parse_allowed_origins(os.environ.get("ALLOWED_ORIGINS", "*"))
 
+
+def _is_set(value: str) -> bool:
+    return bool(value and value.strip())
+
+
+def can_use_vector_store() -> bool:
+    return all((_is_set(YANDEX_API_KEY), _is_set(YANDEX_FOLDER_ID), _is_set(VECTOR_STORE_ID)))
+
+
+def can_call_completions() -> bool:
+    return all((_is_set(YANDEX_API_KEY), _is_set(YANDEX_FOLDER_ID)))
+
 # ========================
 #  Приложение FastAPI
 # ========================
@@ -89,6 +101,8 @@ def ensure_ok(resp: requests.Response, label: str) -> None:
 
 def vs_list_files():
     """Список файлов в Vector Store (для диагностики и фолбэка)."""
+    if not can_use_vector_store():
+        return []
     url = f"{FILES_API}/vector_stores/{VECTOR_STORE_ID}/files"
     r = requests.get(url, headers=yc_json_headers(), timeout=30)
     ensure_ok(r, "Vector Store list")
@@ -120,6 +134,8 @@ SYSTEM_PROMPT_RAG = (
 
 def rag_via_responses(question: str) -> str:
     """RAG через Responses API + Vector Store."""
+    if not can_use_vector_store():
+        raise RuntimeError("Responses API недоступен: не заданы YANDEX_API_KEY/YANDEX_FOLDER_ID/VECTOR_STORE_ID")
     payload = {
         "model": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest",
         "input": [
@@ -161,6 +177,8 @@ def build_context_from_vs(question: str) -> str:
     """Собираем релевантные строки из всех файлов VS, отдавая приоритет ключам про наличие/часы/телефон ресторана.
        Исключаем «завтрак»/«завтраки», если их нет в самом вопросе.
     """
+    if not can_use_vector_store():
+        return "Контекст пуст."
     try:
         ql = (question or "").lower()
         exclude_breakfast = ("завтрак" not in ql and "завтраки" not in ql)
@@ -221,6 +239,8 @@ def build_context_from_vs(question: str) -> str:
 
 def ask_with_vs_context(question: str) -> str:
     """Фолбэк: обычный chat.completions, но с явным контекстом из VS и строгим форматом ответа."""
+    if not can_call_completions():
+        return "Извините, база знаний сейчас недоступна."
     context = build_context_from_vs(question)
     sys = (
         "Отвечай ТОЛЬКО на основе раздела CONTEXT ниже. "
@@ -262,6 +282,8 @@ def debug_info():
             "YANDEX_FOLDER_ID": YANDEX_FOLDER_ID,
             "VECTOR_STORE_ID": VECTOR_STORE_ID,
             "ALLOWED_ORIGINS": ALLOWED_ORIGINS,
+            "CAN_USE_VECTOR_STORE": can_use_vector_store(),
+            "CAN_CALL_COMPLETIONS": can_call_completions(),
         },
         "vs_files_count": 0,
         "vs_sample": [],
