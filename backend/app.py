@@ -135,7 +135,7 @@ class YandexClient:
 
     def _openai_headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Api-Key {self.config.yandex_api_key}",
+            "Authorization": f"Bearer {self.config.yandex_api_key}",
             "OpenAI-Project": self.config.yandex_folder_id,
             "Content-Type": "application/json",
         }
@@ -270,14 +270,17 @@ def rag_via_responses(question: str) -> str:
 
     payload = {
         "model": f"gpt://{CONFIG.yandex_folder_id}/yandexgpt/latest",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT_RAG},
-            {"role": "user", "content": question},
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": SYSTEM_PROMPT_RAG}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": question}]},
         ],
         "tools": [{"type": "file_search"}],
         "tool_resources": {"file_search": {"vector_store_ids": [CONFIG.vector_store_id]}},
         "temperature": 0.0,
-        "max_tokens": 600,
+        "max_output_tokens": 600,
     }
     data = CLIENT.call_responses(payload)
 
