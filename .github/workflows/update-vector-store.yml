@@ -10,7 +10,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write   # нужно, чтобы шаг с обновлением README мог пушить
+
+concurrency:
+  group: vector-store-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   update:
@@ -33,7 +37,7 @@ jobs:
           pip install --upgrade pip
           pip install openai
 
-      - name: Refresh Vector Store
+      - name: Refresh Vector Store (soft update)
         env:
           YANDEX_API_KEY: ${{ secrets.YANDEX_API_KEY }}
           VECTOR_STORE_ID: ${{ secrets.VECTOR_STORE_ID }}
@@ -46,6 +50,7 @@ jobs:
             --timeout 900
 
       - name: Update README timestamp
+        continue-on-error: true
         run: |
           SYNC_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
           echo "Last KB Sync: ${SYNC_DATE}" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -59,4 +64,3 @@ jobs:
           git add README.md
           git commit -m "docs: update last KB sync date (${SYNC_DATE})" || true
           git push
-
