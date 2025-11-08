@@ -1,6 +1,6 @@
 :root{
-  --u4s-primary:#C63C3C;       /* основной цвет бренда */
-  --u4s-primary-ghost:#FBE9E9; /* светлый фон */
+  --u4s-primary:#8A9D4C;       /* основной цвет бренда */
+  --u4s-primary-ghost:#DCE2C9; /* светлый фон */
   --u4s-text:#1f2937;
   --u4s-bg:#ffffff;
 }
@@ -21,7 +21,7 @@
   border:1px solid rgba(0,0,0,.06);
 }
 @media (max-width:480px){ #u4s-chat{ right:12px; bottom:88px; width:calc(100vw - 24px); max-height:76vh } #u4s-fab{ right:12px; bottom:12px } }
-#u4s-head{ background:linear-gradient(180deg, var(--u4s-primary), #A82828); color:#fff; padding:14px 16px; display:flex; align-items:center; gap:10px }
+#u4s-head{ background:linear-gradient(180deg, var(--u4s-primary), #6E7E3D); color:#fff; padding:14px 16px; display:flex; align-items:center; gap:10px }
 #u4s-head .u4s-avatar{ width:32px; height:32px; border-radius:50%; background:#fff2; display:grid; place-items:center; box-shadow:inset 0 0 0 1px #ffffff33 }
 #u4s-head .u4s-title{ font:600 15px/1.1 system-ui, -apple-system, "Segoe UI", Roboto, Arial }
 #u4s-head .u4s-sub{ font:12px/1.2 system-ui, -apple-system, "Segoe UI"; opacity:.9 }
@@ -37,6 +37,6 @@
 @keyframes u4s-bounce{0%,80%,100%{transform:scale(0.6);opacity:.5}40%{transform:scale(1);opacity:1}}
 #u4s-inputbar{ display:flex; gap:8px; padding:10px; background:#fff; border-top:1px solid rgba(0,0,0,.06) }
 #u4s-q{ flex:1; border:1px solid rgba(0,0,0,.12); border-radius:999px; padding:10px 14px; outline:none; font:14px system-ui; transition:border .2s, box-shadow .2s }
-#u4s-q:focus{ border-color:var(--u4s-primary); box-shadow:0 0 0 3px rgba(198,60,60,.18) }
+#u4s-q:focus{ border-color:var(--u4s-primary); box-shadow:0 0 0 3px rgba(138,157,76,.18) }
 #u4s-send{ min-width:44px; border-radius:999px; border:0; background:var(--u4s-primary); color:#fff; font:600 14px system-ui; padding:0 14px; cursor:pointer; transition:opacity .15s, transform .15s }
 #u4s-send:disabled{ opacity:.6; cursor:not-allowed } 
