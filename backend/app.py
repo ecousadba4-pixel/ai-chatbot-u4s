@@ -1,6 +1,9 @@
 # backend/app.py
 import os
+import re
 import json
+from typing import List
+
 import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +21,22 @@ RESPONSES_API = f"{FILES_API}/responses"
 COMPL_API     = "https://llm.api.cloud.yandex.net/v1/chat/completions"
 
 # Разрешённые домены для CORS
-raw_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
-ALLOWED_ORIGINS = [o for o in raw_origins if o]
-if not ALLOWED_ORIGINS:
-    ALLOWED_ORIGINS = ["*"]
+def parse_allowed_origins(raw: str) -> List[str]:
+    """Возвращает список доменов из переменной окружения ALLOWED_ORIGINS.
+
+    Поддерживает разделители запятая, пробел, табы и переводы строк.
+    Пустая строка, а также значение вида "*" трактуется как разрешение для всех
+    доменов.
+    """
+
+    if not raw or raw.strip() == "*":
+        return ["*"]
+
+    parts = [p.strip() for p in re.split(r"[,\s]+", raw) if p.strip()]
+    return parts or ["*"]
+
+
+ALLOWED_ORIGINS = parse_allowed_origins(os.environ.get("ALLOWED_ORIGINS", "*"))
 
 # ========================
 #  Приложение FastAPI
