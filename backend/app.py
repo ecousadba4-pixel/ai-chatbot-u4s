@@ -279,7 +279,7 @@ def rag_via_responses(question: str) -> str:
         ],
         "tools": [{"type": "file_search"}],
         "tool_resources": {"file_search": {"vector_store_ids": [CONFIG.vector_store_id]}},
-        "temperature": 0.0,
+        "temperature": 0.3,
         "max_output_tokens": 600,
     }
     data = CLIENT.call_responses(payload)
@@ -411,7 +411,7 @@ def ask_with_vector_store_context(question: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question},
         ],
-        "temperature": 0.0,
+        "temperature": 0.3,
         "max_tokens": 400,
     }
 
