@@ -13,32 +13,25 @@ permissions:
   contents: write
 
 concurrency:
-  group: "vector-store-${{ github.ref }}"
+  group: vector-store-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate-and-update:
     runs-on: ubuntu-latest
 
-    env:
-      KB_PATH: "kb.jsonl"
-      YANDEX_FOLDER_ID: "b1g2vuvi3is4jn4eamo0"
-      VECTOR_STORE_ID: "${{ secrets.VECTOR_STORE_ID }}"
-      YANDEX_API_KEY: "${{ secrets.YANDEX_API_KEY }}"
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Debug: show workspace tree (one time)
+      - name: Debug: show workspace tree
         run: |
           pwd
           ls -la
-          echo "KB_PATH=${KB_PATH}"
 
       - name: Ensure kb.jsonl exists and is non-empty
         run: |
-          test -s "${KB_PATH}" || { echo "kb.jsonl not found or empty"; exit 1; }
+          test -s "kb.jsonl" || { echo "kb.jsonl not found or empty"; exit 1; }
 
       - name: Basic JSONL validation
         run: |
@@ -47,7 +40,7 @@ jobs:
           ok = True
           with open("kb.jsonl","r",encoding="utf-8") as f:
               for i,line in enumerate(f,1):
-                  if not line.strip():
+                  if not line.strip(): 
                       continue
                   try:
                       o=json.loads(line)
@@ -72,10 +65,14 @@ jobs:
           pip install openai
 
       - name: Soft-refresh Yandex AI Studio Vector Store
+        env:
+          YANDEX_API_KEY: ${{ secrets.YANDEX_API_KEY }}
+          VECTOR_STORE_ID: ${{ secrets.VECTOR_STORE_ID }}
+          YANDEX_FOLDER_ID: b1g2vuvi3is4jn4eamo0
         run: |
           python scripts/refresh_vector_store_files.py \
             --vs-id "${VECTOR_STORE_ID}" \
-            --kb "${KB_PATH}" \
+            --kb "kb.jsonl" \
             --folder-id "${YANDEX_FOLDER_ID}" \
             --timeout 900
 
@@ -94,5 +91,3 @@ jobs:
           git add README.md
           git commit -m "docs: update last KB sync date (${SYNC_DATE})" || echo "no changes to commit"
           git push
-
-
