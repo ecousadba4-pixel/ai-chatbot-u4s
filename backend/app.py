@@ -5,6 +5,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable
 
 import requests
@@ -68,6 +69,8 @@ class AppConfig:
     completion_timeout: float = 60.0
     context_max_chars: int = 2500
     context_per_file_limit: int = 12
+    context_query_limit: int = 24
+    context_snippet_max_chars: int = 500
     cache_ttl: float = 180.0
 
     @classmethod
@@ -199,6 +202,42 @@ class YandexClient:
         data = resp.json()
         return data if isinstance(data, dict) else {}
 
+    def query_vector_store(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        if not self.config.can_use_vector_store:
+            return []
+
+        payload: dict[str, Any] = {
+            "query": query,
+            "top_k": limit,
+            "limit": limit,
+            "return_metadata": True,
+        }
+
+        resp = self._request(
+            "POST",
+            f"{FILES_API}/vector_stores/{self.config.vector_store_id}:query",
+            label="Vector Store query",
+            headers=self._json_headers(),
+            timeout=self.config.http_timeout,
+            json=payload,
+        )
+
+        try:
+            data = resp.json()
+        except Exception:
+            return []
+
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+
+        if isinstance(data, dict):
+            for key in ("data", "results", "matches", "items"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+
+        return []
+
 
 CLIENT = YandexClient(CONFIG)
 
@@ -223,6 +262,9 @@ class VectorStoreGateway:
         meta = self._client.fetch_vector_meta(file_id)
         content = self._client.fetch_vector_content(file_id)
         return meta, content
+
+    def query(self, query: str, *, limit: int) -> list[dict[str, Any]]:
+        return self._client.query_vector_store(query, limit=limit)
 
 
 VECTOR_STORE = VectorStoreGateway(CLIENT, ttl_seconds=CONFIG.cache_ttl)
@@ -311,81 +353,249 @@ TOKEN_SPLIT_RE = re.compile(r"[^0-9a-zA-Zа-яА-ЯёЁ]+")
 
 
 def _extract_keywords(text: str) -> set[str]:
-    """Возвращает множество слов длиной от 3 символов из переданного текста."""
-
     tokens = [
         token
-        for token in TOKEN_SPLIT_RE.split(text.lower())
+        for token in TOKEN_SPLIT_RE.split((text or "").lower())
         if len(token) >= 3
     ]
     return set(tokens)
 
 
-def _score_line(line: str, *, keywords: set[str], index: int) -> tuple[int, int, str]:
-    line_text = line.strip()
-    if not line_text:
-        return (1, index, "")
+def _collect_question_keywords(text: str) -> set[str]:
+    return _extract_keywords(text)
 
-    if keywords:
-        line_keywords = _extract_keywords(line)
-        match_count = len(line_keywords & keywords)
-        if match_count == 0:
-            return (1, index, "")
-        return (-match_count, index, line_text)
 
-    return (0, index, line_text)
+def _collect_texts(value: Any, acc: list[str]) -> None:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            acc.append(text)
+        return
+
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            _collect_texts(value["text"], acc)
+        for key in ("content", "data", "value", "parts", "messages", "snippet"):
+            if key in value:
+                _collect_texts(value[key], acc)
+        return
+
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _collect_texts(item, acc)
+
+
+def _extract_result_text(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+
+    for key in ("content", "text", "snippet", "chunk", "passage", "value"):
+        if key in item:
+            parts: list[str] = []
+            _collect_texts(item[key], parts)
+            if parts:
+                return "\n".join(parts).strip()
+
+    document = item.get("document")
+    if isinstance(document, dict):
+        text = _extract_result_text(document)
+        if text:
+            return text
+
+    return ""
+
+
+def _extract_result_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if not isinstance(item, dict):
+        return metadata
+
+    raw_metadata = item.get("metadata")
+    if isinstance(raw_metadata, dict):
+        metadata.update(raw_metadata)
+
+    document = item.get("document")
+    if isinstance(document, dict):
+        doc_meta = document.get("metadata")
+        if isinstance(doc_meta, dict):
+            metadata = {**doc_meta, **metadata}
+
+    return metadata
+
+
+def _to_float(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace(",", "."))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _extract_timestamp(metadata: dict[str, Any]) -> float:
+    for key in ("updated_at", "timestamp", "modified_at", "created_at", "time"):
+        value = metadata.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                continue
+            try:
+                normalized = raw.replace("Z", "+00:00")
+                return datetime.fromisoformat(normalized).timestamp()
+            except Exception:
+                try:
+                    return float(raw)
+                except ValueError:
+                    continue
+    return 0.0
+
+
+def _metadata_keyword_overlap(metadata: dict[str, Any], keywords: set[str]) -> int:
+    if not metadata or not keywords:
+        return 0
+
+    parts: list[str] = []
+    for key in ("type", "entity", "title", "tags", "category", "label"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple, set)):
+            parts.extend(str(item) for item in value)
+
+    if not parts:
+        return 0
+
+    meta_keywords = _extract_keywords(" ".join(parts))
+    return len(meta_keywords & keywords)
+
+
+def _format_context_block(metadata: dict[str, Any], text: str) -> str:
+    title_parts: list[str] = []
+    for key in ("entity", "title", "name"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            title_parts.append(value.strip())
+
+    if not title_parts:
+        filename = metadata.get("filename")
+        if isinstance(filename, str) and filename.strip():
+            title_parts.append(filename.strip())
+
+    title = " — ".join(dict.fromkeys(title_parts)) if title_parts else ""
+    header = f"### {title or 'Фрагмент'}"
+
+    info_parts: list[str] = []
+    meta_type = metadata.get("type")
+    if isinstance(meta_type, str) and meta_type.strip():
+        info_parts.append(f"Тип: {meta_type.strip()}")
+
+    entity = metadata.get("entity")
+    if isinstance(entity, str) and entity.strip() and entity.strip() not in title_parts:
+        info_parts.append(f"Объект: {entity.strip()}")
+
+    weight = metadata.get("weight_hint")
+    if isinstance(weight, (int, float, str)):
+        weight_value = str(weight).strip()
+        if weight_value:
+            info_parts.append(f"Вес: {weight_value}")
+
+    updated = metadata.get("updated_at") or metadata.get("modified_at")
+    if isinstance(updated, str) and updated.strip():
+        info_parts.append(f"Обновлено: {updated.strip()}")
+
+    block_lines = [header]
+    if info_parts:
+        block_lines.append(" | ".join(info_parts))
+    block_lines.append(text)
+    return "\n".join(block_lines)
+
+
+def _trim_text(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 def build_context_from_vector_store(question: str) -> str:
     if not CONFIG.can_use_vector_store:
         return "Контекст пуст."
 
+    keywords = _collect_question_keywords(question)
+    query = question.strip()
+    if keywords:
+        query = f"{question.strip()}\n\nКлючевые слова: {' '.join(sorted(keywords))}"
+
     try:
-        keywords = _extract_keywords(question)
-        snippets: list[str] = []
-        total_chars = 0
-
-        for file_info in VECTOR_STORE.list_files():
-            file_id = file_info.get("id")
-            if not isinstance(file_id, str):
-                continue
-
-            meta, content = VECTOR_STORE.fetch_file(file_id)
-            lines = content.splitlines()
-
-            scored_hits: list[tuple[int, int, str]] = []
-            for index, raw_line in enumerate(lines):
-                score = _score_line(raw_line, keywords=keywords, index=index)
-                if score[2]:
-                    scored_hits.append(score)
-
-            if keywords and not scored_hits:
-                for index, raw_line in enumerate(lines):
-                    line_text = raw_line.strip()
-                    if not line_text:
-                        continue
-                    scored_hits.append((0, index, line_text))
-                    if len(scored_hits) >= CONFIG.context_per_file_limit:
-                        break
-
-            if not scored_hits:
-                continue
-
-            scored_hits.sort()
-            top_hits = [text for _, _, text in scored_hits[: CONFIG.context_per_file_limit]]
-            filename = meta.get("filename") if isinstance(meta, dict) else None
-            header = f"### {filename or 'file'}"
-            block = "\n".join([header, *top_hits])
-
-            snippets.append(block)
-            total_chars += len(block)
-            if total_chars >= CONFIG.context_max_chars:
-                break
-
-        return "\n\n".join(snippets) if snippets else "Контекст пуст."
+        raw_results = VECTOR_STORE.query(query, limit=CONFIG.context_query_limit)
     except Exception as error:
-        print("build_context_from_vector_store ERROR:", error)
+        print("vector_store.query ERROR:", error)
+        raw_results = []
+
+    if not raw_results:
         return "Контекст пуст."
+
+    scored_results: list[tuple[tuple[Any, ...], dict[str, Any], str]] = []
+
+    for index, item in enumerate(raw_results):
+        if not isinstance(item, dict):
+            continue
+
+        text = _extract_result_text(item)
+        if not text:
+            continue
+
+        metadata = _extract_result_metadata(item)
+
+        weight = _to_float(metadata.get("weight_hint"))
+        score = _to_float(
+            item.get("score")
+            or item.get("similarity")
+            or item.get("relevance")
+            or item.get("rank")
+        )
+        overlap = len(_extract_keywords(text) & keywords) + _metadata_keyword_overlap(metadata, keywords)
+        timestamp = _extract_timestamp(metadata)
+
+        sort_key = (-score, -weight, -overlap, -timestamp, index)
+        scored_results.append((sort_key, metadata, text))
+
+    if not scored_results:
+        return "Контекст пуст."
+
+    scored_results.sort()
+
+    snippets: list[str] = []
+    total_chars = 0
+    entity_hits: dict[str, int] = {}
+    seen_texts: set[str] = set()
+
+    for _, metadata, text in scored_results:
+        snippet_text = _trim_text(text, CONFIG.context_snippet_max_chars)
+        if not snippet_text or snippet_text in seen_texts:
+            continue
+
+        seen_texts.add(snippet_text)
+
+        entity_key = "".join(
+            str(metadata.get(field, "")).lower() for field in ("entity", "title", "filename")
+        ) or "_default"
+        hits = entity_hits.get(entity_key, 0)
+        if hits >= CONFIG.context_per_file_limit:
+            continue
+        entity_hits[entity_key] = hits + 1
+
+        block = _format_context_block(metadata, snippet_text)
+        snippets.append(block)
+        total_chars += len(block)
+        if total_chars >= CONFIG.context_max_chars:
+            break
+
+    return "\n\n".join(snippets) if snippets else "Контекст пуст."
 
 
 def ask_with_vector_store_context(question: str) -> str:
