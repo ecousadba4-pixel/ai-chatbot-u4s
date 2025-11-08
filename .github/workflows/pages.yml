@@ -1,10 +1,11 @@
 name: Deploy frontend to GitHub Pages (minify + cache-bust)
 
 on:
+  workflow_dispatch: {}                # ← ручной запуск из Actions
   push:
     branches: [ main ]
     paths:
-      - 'frontend/**'
+      - 'frontend/**'                  # автозапуск при изменениях во /frontend
 
 permissions:
   contents: read
@@ -23,7 +24,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set build version (UTC timestamp + short SHA)
-        run: echo "VERSION=$(date -u +'%Y%m%d%H%M%S')-${GITHUB_SHA::7}" >> $GITHUB_ENV
+        run: |
+          echo "VERSION=$(date -u +'%Y%m%d%H%M%S')-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "Build VERSION=$VERSION"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -57,6 +60,12 @@ jobs:
           # Версия для cache-bust
           echo "{\"version\":\"$VERSION\"}" > dist/version.json
 
+          # Не используем Jekyll и опциональный CNAME
+          touch dist/.nojekyll
+          if [ -n "${{ vars.CNAME_DOMAIN }}" ]; then
+            echo "${{ vars.CNAME_DOMAIN }}" > dist/CNAME
+          fi
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -71,3 +80,4 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
