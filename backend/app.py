@@ -135,7 +135,7 @@ class YandexClient:
 
     def _openai_headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {self.config.yandex_api_key}",
+            "Authorization": f"Api-Key {self.config.yandex_api_key}",
             "OpenAI-Project": self.config.yandex_folder_id,
             "Content-Type": "application/json",
         }
