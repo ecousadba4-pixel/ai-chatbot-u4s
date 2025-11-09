@@ -433,7 +433,12 @@ def ask_with_vector_store_context(question: str) -> str:
         "max_output_tokens": 1800,
     }
 
-    data = CLIENT.call_responses(payload)
+    try:
+        data = CLIENT.call_responses(payload)
+    except Exception as error:
+        print("Fallback Responses API error:", error)
+        return "Извините, сейчас не могу ответить. Попробуйте позже."
+
     answer = _extract_responses_text(data)
     return answer or "Нет данных в базе знаний."
 

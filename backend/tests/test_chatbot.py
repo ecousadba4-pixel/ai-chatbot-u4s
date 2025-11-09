@@ -67,3 +67,17 @@ def test_rag_payload_uses_vector_store(app_module):
     assert pytest.approx(payload["temperature"]) == 0.3
     assert pytest.approx(payload["top_p"]) == 0.8
     assert payload["max_output_tokens"] >= 1500
+
+
+def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
+    monkeypatch.setattr(
+        app_module, "build_context_from_vector_store", lambda question: "Контекст пуст."
+    )
+
+    def _failing_call_responses(payload):
+        raise RuntimeError("Responses API HTTP 500: boom")
+
+    monkeypatch.setattr(app_module.CLIENT, "call_responses", _failing_call_responses)
+
+    answer = app_module.ask_with_vector_store_context("Привет")
+    assert answer == "Извините, сейчас не могу ответить. Попробуйте позже."
