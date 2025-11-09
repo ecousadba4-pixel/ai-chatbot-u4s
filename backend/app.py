@@ -13,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 FILES_API = "https://rest-assistant.api.cloud.yandex.net/v1"
 RESPONSES_API = f"{FILES_API}/responses"
-COMPLETIONS_API = "https://llm.api.cloud.yandex.net/v1/chat/completions"
 
 
 # ========================
@@ -133,13 +132,6 @@ class YandexClient:
             "Content-Type": "application/json",
         }
 
-    def _openai_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.config.yandex_api_key}",
-            "OpenAI-Project": self.config.yandex_folder_id,
-            "Content-Type": "application/json",
-        }
-
     def list_vector_files(self) -> list[dict[str, Any]]:
         if not self.config.can_use_vector_store:
             return []
@@ -181,18 +173,6 @@ class YandexClient:
             RESPONSES_API,
             label="Responses API",
             headers=self._json_headers(),
-            timeout=self.config.completion_timeout,
-            json=payload,
-        )
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
-
-    def call_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
-        resp = self._request(
-            "POST",
-            COMPLETIONS_API,
-            label="Completions API",
-            headers=self._openai_headers(),
             timeout=self.config.completion_timeout,
             json=payload,
         )
@@ -262,6 +242,45 @@ SYSTEM_PROMPT_RAG = (
 )
 
 
+def _extract_responses_text(data: dict[str, Any]) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    choices = data.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+                if isinstance(content, list):
+                    texts = [item.get("text", "") for item in content if isinstance(item, dict)]
+                    merged = "\n".join(text for text in texts if isinstance(text, str) and text.strip())
+                    if merged.strip():
+                        return merged.strip()
+
+    blocks: list[str] = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") == "output_text":
+                text = content.get("text")
+                if isinstance(text, str) and text.strip():
+                    blocks.append(text.strip())
+
+    return "\n".join(blocks).strip()
+
+
 def rag_via_responses(question: str) -> str:
     if not CONFIG.can_use_vector_store:
         raise RuntimeError(
@@ -280,27 +299,13 @@ def rag_via_responses(question: str) -> str:
         "tools": [{"type": "file_search"}],
         "tool_resources": {"file_search": {"vector_store_ids": [CONFIG.vector_store_id]}},
         "temperature": 0.3,
-        "max_output_tokens": 600,
+        "top_p": 0.8,
+        "max_output_tokens": 2000,
     }
     data = CLIENT.call_responses(payload)
 
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if isinstance(choices, list) and choices:
-        message = choices[0].get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return message["content"].strip()
-
-    if isinstance(data, dict) and isinstance(data.get("output_text"), str):
-        return data["output_text"].strip()
-
-    blocks: list[str] = []
-    if isinstance(data, dict):
-        for item in data.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                if content.get("type") == "output_text" and content.get("text"):
-                    blocks.append(content["text"])
-
-    return ("\n".join(blocks)).strip() if blocks else "Нет данных в базе знаний."
+    answer = _extract_responses_text(data)
+    return answer or "Нет данных в базе знаний."
 
 
 # ========================
@@ -407,22 +412,21 @@ def ask_with_vector_store_context(question: str) -> str:
 
     payload = {
         "model": f"gpt://{CONFIG.yandex_folder_id}/yandexgpt/latest",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_prompt}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": question}]},
         ],
         "temperature": 0.3,
-        "max_tokens": 400,
+        "top_p": 0.8,
+        "max_output_tokens": 1800,
     }
 
-    data = CLIENT.call_completions(payload)
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if isinstance(choices, list) and choices:
-        message = choices[0].get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return message["content"]
-
-    return "Нет данных в базе знаний."
+    data = CLIENT.call_responses(payload)
+    answer = _extract_responses_text(data)
+    return answer or "Нет данных в базе знаний."
 
 
 # ========================
