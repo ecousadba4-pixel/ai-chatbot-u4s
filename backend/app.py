@@ -297,7 +297,12 @@ def rag_via_responses(question: str) -> str:
             {"role": "user", "content": [{"type": "input_text", "text": question}]},
         ],
         "tools": [{"type": "file_search"}],
-        "tool_resources": {"file_search": {"vector_store_ids": [CONFIG.vector_store_id]}},
+        "tool_resources": {
+            "file_search": {
+                "vector_store_ids": [CONFIG.vector_store_id],
+                "top_k": 8,
+            }
+        },
         "temperature": 0.3,
         "top_p": 0.8,
         "max_output_tokens": 2000,

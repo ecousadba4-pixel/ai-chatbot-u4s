@@ -4,8 +4,50 @@ import time
 import argparse
 from pathlib import Path
 from openai import OpenAI
+import requests
 
 BASE_URL = "https://rest-assistant.api.cloud.yandex.net/v1"
+
+
+def update_chunking_strategy(*, api_key: str, folder_id: str, search_index_id: str,
+                             max_chunk_tokens: int, overlap_tokens: int) -> None:
+    """Вызывает SearchIndex.Update для настройки чанков."""
+
+    url = f"{BASE_URL}/searchIndices:update"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "x-folder-id": folder_id,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "searchIndexId": search_index_id,
+        "chunkingStrategy": {
+            "staticStrategy": {
+                "maxChunkSizeTokens": max_chunk_tokens,
+                "chunkOverlapTokens": overlap_tokens,
+            }
+        },
+    }
+
+    print("\n🧱 Обновляю параметры разбивки на чанки…")
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    if resp.status_code >= 300:
+        body = resp.text
+        try:
+            data = resp.json()
+            body = str(data)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"SearchIndex.Update HTTP {resp.status_code}: {body[:500]}"
+        )
+
+    data = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+    status = data.get("status") if isinstance(data, dict) else None
+    print(
+        "   ✅ Параметры чанков обновлены"
+        + (f" (status={status})" if status else "")
+    )
 
 def mask(s: str, keep=4):
     if not s:
@@ -47,6 +89,8 @@ def main():
     ap.add_argument("--kb", required=True, help="Путь к kb.jsonl")
     ap.add_argument("--folder-id", required=True, help="YANDEX_FOLDER_ID")
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--chunk-size", type=int, default=512, help="Размер чанка в токенах")
+    ap.add_argument("--chunk-overlap", type=int, default=128, help="Перекрытие чанков в токенах")
     args = ap.parse_args()
 
     api_key = os.environ.get("YANDEX_API_KEY", "").strip()
@@ -67,6 +111,14 @@ def main():
     # Проверка стора
     vs = client.vector_stores.retrieve(args.vs_id)
     print(f"   ✅ Найден стор: name={getattr(vs, 'name','')}, status={getattr(vs,'status','unknown')}")
+
+    update_chunking_strategy(
+        api_key=api_key,
+        folder_id=args.folder_id,
+        search_index_id=args.vs_id,
+        max_chunk_tokens=args.chunk_size,
+        overlap_tokens=args.chunk_overlap,
+    )
 
     # Удаляем старые файлы
     print("\n🧹 Удаляю старые файлы из стора…")
