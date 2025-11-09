@@ -1,6 +1,9 @@
+import asyncio
 import importlib
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -9,7 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.redis_gateway import parse_redis_args
+from backend.redis_gateway import REDIS_MAX_MESSAGES, parse_redis_args
 
 
 class DummyClient:
@@ -41,6 +44,33 @@ class DummyClient:
         return ""
 
 
+class DummyRedisGateway:
+    def __init__(self, *, max_messages: int = REDIS_MAX_MESSAGES):
+        self.max_messages = max_messages
+        self.storage: dict[str, list[dict]] = {}
+
+    def read_history(self, session_id: str) -> list[dict]:
+        return [dict(item) for item in self.storage.get(session_id, [])]
+
+    def write_history(self, session_id: str, messages, ttl: int | None = None) -> None:
+        limited = [dict(item) for item in messages][-self.max_messages :]
+        self.storage[session_id] = limited
+
+    def delete_history(self, session_id: str) -> None:
+        self.storage.pop(session_id, None)
+
+
+class DummyRequest:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+    async def body(self):
+        return json.dumps(self._payload).encode("utf-8")
+
+
 @pytest.fixture()
 def app_module(monkeypatch):
     module_name = "backend.app"
@@ -62,7 +92,11 @@ def app_module(monkeypatch):
 def test_rag_payload_uses_vector_store(app_module):
     client: DummyClient = app_module.CLIENT  # type: ignore[assignment]
 
-    answer = app_module.rag_via_responses("Расскажи про ресторан")
+    messages = [
+        {"role": "system", "content": app_module.SYSTEM_PROMPT_RAG},
+        {"role": "user", "content": "Расскажи про ресторан"},
+    ]
+    answer = app_module.rag_via_responses(messages)
     assert answer == "Ответ"
 
     assert len(client.calls) == 1
@@ -78,7 +112,9 @@ def test_rag_payload_uses_vector_store(app_module):
 
 def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
     monkeypatch.setattr(
-        app_module, "build_context_from_vector_store", lambda question: "Контекст пуст."
+        app_module,
+        "build_context_from_vector_store",
+        lambda question: "Контекст пуст.",
     )
 
     def _failing_call_responses(payload):
@@ -86,7 +122,11 @@ def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
 
     monkeypatch.setattr(app_module.CLIENT, "call_responses", _failing_call_responses)
 
-    answer = app_module.ask_with_vector_store_context("Привет")
+    messages = [
+        {"role": "system", "content": app_module.SYSTEM_PROMPT_RAG},
+        {"role": "user", "content": "Привет"},
+    ]
+    answer = app_module.ask_with_vector_store_context(messages)
     assert answer == "Извините, сейчас не могу ответить. Попробуйте позже."
 
 
@@ -102,3 +142,42 @@ def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
 )
 def test_parse_redis_args_handles_multiple_formats(raw, expected):
     assert parse_redis_args(raw) == expected
+
+
+def test_chat_post_merges_and_persists_history(app_module, monkeypatch):
+    redis_gateway = DummyRedisGateway(max_messages=4)
+    redis_gateway.storage["abc"] = [
+        {"role": "user", "content": "Привет", "timestamp": 10.0},
+        {"role": "assistant", "content": "Здравствуйте", "timestamp": 11.0},
+    ]
+    monkeypatch.setattr(app_module, "REDIS_GATEWAY", redis_gateway)
+
+    payload = {
+        "sessionId": "abc",
+        "history": [
+            {"role": "user", "content": "Как дела?", "timestamp": 12.0},
+            {"role": "assistant", "content": "Все отлично", "timestamp": 13.0},
+        ],
+        "question": "Расскажи про ресторан",
+    }
+
+    response = asyncio.run(app_module.chat_post(DummyRequest(payload)))
+    assert response["answer"] == "Ответ"
+
+    history = redis_gateway.storage["abc"]
+    assert [msg["role"] for msg in history] == ["user", "assistant", "user", "assistant"]
+    assert history[-2]["content"] == app_module.normalize_question(payload["question"])
+    assert history[-1]["content"] == "Ответ"
+    assert history[-1]["timestamp"] >= history[-2]["timestamp"]
+
+
+def test_chat_reset_endpoint_clears_history(app_module, monkeypatch):
+    redis_gateway = DummyRedisGateway()
+    redis_gateway.storage["session"] = [
+        {"role": "user", "content": "Привет", "timestamp": time.time()},
+    ]
+    monkeypatch.setattr(app_module, "REDIS_GATEWAY", redis_gateway)
+
+    response = asyncio.run(app_module.chat_reset(DummyRequest({"sessionId": "session"})))
+    assert response == {"ok": True}
+    assert "session" not in redis_gateway.storage

@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .redis_gateway import (
+    REDIS_MAX_MESSAGES,
     RedisHistoryGateway,
     create_redis_client,
     parse_redis_args,
@@ -111,6 +112,155 @@ CONFIG = AppConfig.from_env()
 REDIS_GATEWAY = RedisHistoryGateway(
     create_redis_client(CONFIG.redis_url, CONFIG.redis_args)
 )
+
+
+# ========================
+#  Работа с историей диалога
+# ========================
+
+ChatHistoryItem = dict[str, Any]
+ChatModelMessage = dict[str, str]
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        return lowered in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _coerce_timestamp(value: Any, fallback: float) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def _sanitize_history_messages(raw_history: Any) -> list[ChatHistoryItem]:
+    if not isinstance(raw_history, Sequence) or isinstance(raw_history, (str, bytes)):
+        return []
+
+    sanitized: list[ChatHistoryItem] = []
+    base_time = time.time()
+    for index, item in enumerate(raw_history):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        timestamp = _coerce_timestamp(item.get("timestamp"), base_time + index * 1e-3)
+        sanitized.append({"role": role, "content": content, "timestamp": timestamp})
+    return sanitized
+
+
+def _merge_histories(*histories: Sequence[ChatHistoryItem], limit: int | None = None) -> list[ChatHistoryItem]:
+    combined: list[tuple[float, int, ChatHistoryItem]] = []
+    order = 0
+    for history in histories:
+        for item in history or []:
+            if not isinstance(item, dict):
+                continue
+            timestamp = float(item.get("timestamp", 0.0) or 0.0)
+            content = str(item.get("content", "")).strip()
+            role = str(item.get("role", "")).strip().lower()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            combined.append((timestamp, order, {"role": role, "content": content, "timestamp": timestamp}))
+            order += 1
+
+    combined.sort(key=lambda entry: (entry[0], entry[1]))
+    merged = [item for _, _, item in combined]
+    if limit is not None:
+        merged = merged[-limit:]
+    return merged
+
+
+def _build_conversation_messages(
+    history: Sequence[ChatHistoryItem],
+    *,
+    question: str,
+) -> list[ChatModelMessage]:
+    messages: list[ChatModelMessage] = [
+        {"role": "system", "content": SYSTEM_PROMPT_RAG},
+    ]
+
+    for item in history:
+        messages.append({"role": item["role"], "content": item["content"]})
+
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def _extract_last_user_content(messages: Sequence[ChatModelMessage]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content", "")).strip()
+    return ""
+
+
+def _normalize_messages_for_model(
+    messages: Sequence[ChatModelMessage],
+) -> tuple[list[ChatModelMessage], str]:
+    normalized: list[ChatModelMessage] = []
+    last_user_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            last_user_index = index
+            break
+
+    normalized_question = ""
+    for index, message in enumerate(messages):
+        role = str(message.get("role", "")).strip()
+        content = str(message.get("content", "")).strip()
+        if index == last_user_index:
+            content = normalize_question(content)
+            normalized_question = content
+        normalized.append({"role": role, "content": content})
+
+    return normalized, normalized_question
+
+
+def _replace_system_prompt(
+    messages: Sequence[ChatModelMessage], new_prompt: str
+) -> list[ChatModelMessage]:
+    replaced: list[ChatModelMessage] = []
+    system_set = False
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            if not system_set:
+                replaced.append({"role": "system", "content": new_prompt})
+                system_set = True
+            continue
+        replaced.append({"role": str(role), "content": str(message.get("content", "")).strip()})
+
+    if not system_set:
+        replaced.insert(0, {"role": "system", "content": new_prompt})
+    return replaced
+
+
+def _messages_to_responses_input(messages: Sequence[ChatModelMessage]) -> list[dict[str, Any]]:
+    payload_messages: list[dict[str, Any]] = []
+    for message in messages:
+        text = str(message.get("content", ""))
+        payload_messages.append(
+            {
+                "role": str(message.get("role", "")),
+                "content": [{"type": "input_text", "text": text}],
+            }
+        )
+    return payload_messages
 
 
 # ========================
@@ -308,7 +458,7 @@ def _extract_responses_text(data: dict[str, Any]) -> str:
     return "\n".join(blocks).strip()
 
 
-def rag_via_responses(question: str) -> str:
+def rag_via_responses(messages: Sequence[ChatModelMessage]) -> str:
     if not CONFIG.can_use_vector_store:
         raise RuntimeError(
             "Responses API недоступен: не заданы YANDEX_API_KEY/YANDEX_FOLDER_ID/VECTOR_STORE_ID",
@@ -316,13 +466,7 @@ def rag_via_responses(question: str) -> str:
 
     payload = {
         "model": f"gpt://{CONFIG.yandex_folder_id}/yandexgpt/latest",
-        "input": [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": SYSTEM_PROMPT_RAG}],
-            },
-            {"role": "user", "content": [{"type": "input_text", "text": question}]},
-        ],
+        "input": _messages_to_responses_input(messages),
         "tools": [
             {"type": "file_search"},
             {"type": "web_search"},
@@ -433,10 +577,11 @@ def build_context_from_vector_store(question: str) -> str:
         return "Контекст пуст."
 
 
-def ask_with_vector_store_context(question: str) -> str:
+def ask_with_vector_store_context(messages: Sequence[ChatModelMessage]) -> str:
     if not CONFIG.has_api_credentials:
         return "Извините, база знаний сейчас недоступна."
 
+    question = _extract_last_user_content(messages)
     context = build_context_from_vector_store(question)
     system_prompt = (
         "Ты — русскоязычный AI-консьерж отеля «Усадьба Четыре Сезона».\n"
@@ -450,15 +595,11 @@ def ask_with_vector_store_context(question: str) -> str:
         f"CONTEXT:\n{context}"
     )
 
+    prepared_messages = _replace_system_prompt(messages, system_prompt)
+
     payload = {
         "model": f"gpt://{CONFIG.yandex_folder_id}/yandexgpt/latest",
-        "input": [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            },
-            {"role": "user", "content": [{"type": "input_text", "text": question}]},
-        ],
+        "input": _messages_to_responses_input(prepared_messages),
         "temperature": 0.3,
         "top_p": 0.8,
         "max_output_tokens": 1800,
@@ -489,14 +630,13 @@ app.add_middleware(
 )
 
 
-def _produce_answer(question: str, *, log_prefix: str) -> str:
-    normalized = normalize_question(question)
+def _produce_answer(messages: Sequence[ChatModelMessage], *, log_prefix: str) -> str:
     try:
-        return rag_via_responses(normalized)
+        return rag_via_responses(messages)
     except Exception as rag_error:
         print(f"{log_prefix} RAG error:", rag_error)
         try:
-            return ask_with_vector_store_context(normalized)
+            return ask_with_vector_store_context(messages)
         except Exception as fallback_error:
             print(f"{log_prefix} fallback error:", fallback_error)
             raise
@@ -505,14 +645,28 @@ def _produce_answer(question: str, *, log_prefix: str) -> str:
 async def _read_json_payload(request: Request) -> dict[str, Any]:
     try:
         data = await request.json()
-        return data if isinstance(data, dict) else {}
+        parsed = data if isinstance(data, dict) else {}
     except Exception:
         raw = await request.body()
         try:
             data = json.loads(raw.decode("utf-8", errors="ignore") or "{}")
         except Exception:
-            return {}
-        return data if isinstance(data, dict) else {}
+            parsed = {}
+        else:
+            parsed = data if isinstance(data, dict) else {}
+
+    session_id = str(parsed.get("sessionId", "")).strip()
+    history = _sanitize_history_messages(parsed.get("history"))
+    question = str(parsed.get("question", "")).strip()
+    reset = _to_bool(parsed.get("reset"))
+
+    return {
+        **parsed,
+        "sessionId": session_id,
+        "history": history,
+        "question": question,
+        "reset": reset,
+    }
 
 
 @app.get("/health")
@@ -546,7 +700,9 @@ def debug_info() -> dict[str, Any]:
 @app.get("/api/chat")
 def chat_get(q: str = "") -> dict[str, str]:
     try:
-        answer = _produce_answer(q, log_prefix="GET")
+        conversation = _build_conversation_messages([], question=str(q or ""))
+        normalized_messages, _ = _normalize_messages_for_model(conversation)
+        answer = _produce_answer(normalized_messages, log_prefix="GET")
         return {"answer": answer}
     except Exception as fatal_error:
         print("FATAL (GET):", fatal_error)
@@ -556,11 +712,53 @@ def chat_get(q: str = "") -> dict[str, str]:
 @app.post("/api/chat")
 async def chat_post(request: Request) -> dict[str, str]:
     payload = await _read_json_payload(request)
-    question = str(payload.get("question", "")).strip()
+    session_id = payload.get("sessionId", "")
+    client_history: list[ChatHistoryItem] = payload.get("history", [])
+    question = payload.get("question", "")
+    reset_requested = bool(payload.get("reset"))
+
+    history_limit = getattr(REDIS_GATEWAY, "max_messages", REDIS_MAX_MESSAGES)
+
+    redis_history: list[ChatHistoryItem] = []
+    if session_id:
+        if reset_requested:
+            REDIS_GATEWAY.delete_history(session_id)
+        else:
+            redis_history = REDIS_GATEWAY.read_history(session_id)
+
+    merged_history = _merge_histories(redis_history, client_history, limit=history_limit)
+
+    conversation = _build_conversation_messages(merged_history, question=question)
+    normalized_messages, normalized_question = _normalize_messages_for_model(conversation)
 
     try:
-        answer = _produce_answer(question, log_prefix="POST")
-        return {"answer": answer}
+        answer = _produce_answer(normalized_messages, log_prefix="POST")
     except Exception as fatal_error:
         print("FATAL (POST):", fatal_error)
         return {"answer": "Извините, сейчас не могу ответить. Попробуйте позже."}
+    else:
+        if session_id:
+            now = time.time()
+            stored_history = merged_history + [
+                {"role": "user", "content": normalized_question, "timestamp": now},
+                {
+                    "role": "assistant",
+                    "content": str(answer).strip(),
+                    "timestamp": now + 1e-3,
+                },
+            ]
+            stored_history = stored_history[-history_limit:]
+            REDIS_GATEWAY.write_history(session_id, stored_history)
+
+        return {"answer": answer}
+
+
+@app.post("/api/chat/reset")
+async def chat_reset(request: Request) -> dict[str, bool]:
+    payload = await _read_json_payload(request)
+    session_id = payload.get("sessionId", "")
+
+    if session_id:
+        REDIS_GATEWAY.delete_history(session_id)
+
+    return {"ok": True}
