@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any, Sequence
 
@@ -59,6 +60,9 @@ else:
     )
 
 
+logger = logging.getLogger(__name__)
+
+
 REDIS_GATEWAY = RedisHistoryGateway(
     create_redis_client(CONFIG.redis_url, CONFIG.redis_args)
 )
@@ -95,12 +99,12 @@ def build_context_from_vector_store(question: str) -> str:
 def _produce_answer(messages: Sequence[ChatModelMessage], *, log_prefix: str) -> str:
     try:
         return rag_via_responses(messages)
-    except Exception as rag_error:
-        print(f"{log_prefix} RAG error:", rag_error)
+    except Exception:
+        logger.exception("%s RAG error", log_prefix)
         try:
             return ask_with_vector_store_context(messages)
-        except Exception as fallback_error:
-            print(f"{log_prefix} fallback error:", fallback_error)
+        except Exception:
+            logger.exception("%s fallback error", log_prefix)
             raise
 
 
@@ -170,8 +174,8 @@ def chat_get(q: str = "") -> dict[str, str]:
         normalized_messages, _ = normalize_messages_for_model(conversation)
         answer = _produce_answer(normalized_messages, log_prefix="GET")
         return {"answer": answer}
-    except Exception as fatal_error:
-        print("FATAL (GET):", fatal_error)
+    except Exception:
+        logger.exception("FATAL (GET)")
         return {"answer": "Извините, сейчас не могу ответить. Попробуйте позже."}
 
 
@@ -203,8 +207,8 @@ async def chat_post(request: Request) -> dict[str, str]:
 
     try:
         answer = _produce_answer(normalized_messages, log_prefix="POST")
-    except Exception as fatal_error:
-        print("FATAL (POST):", fatal_error)
+    except Exception:
+        logger.exception("FATAL (POST)")
         return {"answer": "Извините, сейчас не могу ответить. Попробуйте позже."}
     else:
         if session_id:

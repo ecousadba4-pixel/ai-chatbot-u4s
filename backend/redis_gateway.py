@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 from typing import Any, Sequence
 from urllib.parse import parse_qsl
@@ -11,6 +12,9 @@ try:  # pragma: no cover - опциональная зависимость в т
     import redis
 except ModuleNotFoundError:  # pragma: no cover - graceful degradation без redis
     redis = None
+
+logger = logging.getLogger(__name__)
+
 
 REDIS_HISTORY_KEY = "chat:history:{session_id}"
 REDIS_HISTORY_TTL_SECONDS = 30 * 60
@@ -88,8 +92,8 @@ def create_redis_client(
 
     try:
         return redis.Redis.from_url(url, **extra_args)
-    except Exception as error:  # pragma: no cover - защититься от ошибок конфига
-        print("Redis init error:", error)
+    except Exception:  # pragma: no cover - защититься от ошибок конфига
+        logger.exception("Redis init error")
         return None
 
 
@@ -123,8 +127,8 @@ class RedisHistoryGateway:
             if not key:
                 return []
             raw_value = self._client.get(key)
-        except Exception as error:  # pragma: no cover - логируем и идем дальше
-            print("Redis read_history error:", error)
+        except Exception:  # pragma: no cover - логируем и идем дальше
+            logger.exception("Redis read_history error")
             return []
         if not raw_value:
             return []
@@ -160,8 +164,8 @@ class RedisHistoryGateway:
         try:
             payload = json.dumps(limited, ensure_ascii=False)
             self._client.setex(key, ttl_seconds, payload)
-        except Exception as error:  # pragma: no cover - логируем и идем дальше
-            print("Redis write_history error:", error)
+        except Exception:  # pragma: no cover - логируем и идем дальше
+            logger.exception("Redis write_history error")
 
     def delete_history(self, session_id: str) -> None:
         if not self._client:
@@ -171,6 +175,6 @@ class RedisHistoryGateway:
             return
         try:
             self._client.delete(key)
-        except Exception as error:  # pragma: no cover - логируем и идем дальше
-            print("Redis delete_history error:", error)
+        except Exception:  # pragma: no cover - логируем и идем дальше
+            logger.exception("Redis delete_history error")
 
