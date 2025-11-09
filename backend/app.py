@@ -257,45 +257,51 @@ def _trim_messages_for_model(
     if not messages or max_tokens <= 0:
         return list(messages)
 
-    trimmed: list[ChatModelMessage] = [
-        {
+    trimmed: list[ChatModelMessage] = []
+    tokens_per_message: list[int] = []
+
+    for message in messages:
+        normalized_message = {
             "role": str(message.get("role", "")),
             "content": str(message.get("content", "")),
         }
-        for message in messages
-    ]
+        trimmed.append(normalized_message)
+        tokens_per_message.append(_estimate_tokens(normalized_message["content"]))
 
-    required_ids: set[int] = set()
+    required_indices: set[int] = set()
 
     if trimmed and trimmed[0].get("role") == "system":
-        required_ids.add(id(trimmed[0]))
+        required_indices.add(0)
 
     for index in range(len(trimmed) - 1, -1, -1):
         if trimmed[index].get("role") == "user":
-            required_ids.add(id(trimmed[index]))
+            required_indices.add(index)
             break
 
     assistant_indices = [index for index, item in enumerate(trimmed) if item.get("role") == "assistant"]
     for index in assistant_indices[-min_assistant_messages:]:
-        required_ids.add(id(trimmed[index]))
+        required_indices.add(index)
 
-    tokens = sum(_estimate_tokens(item.get("content", "")) for item in trimmed)
+    total_tokens = sum(tokens_per_message)
+    if total_tokens <= max_tokens:
+        return trimmed
 
-    while tokens > max_tokens:
-        removable_index = None
-        for index, item in enumerate(trimmed):
-            if id(item) in required_ids:
-                continue
-            removable_index = index
+    removed_flags = [False] * len(trimmed)
+
+    for index in range(len(trimmed)):
+        if index in required_indices:
+            continue
+        if total_tokens <= max_tokens:
             break
+        removed_flags[index] = True
+        total_tokens -= tokens_per_message[index]
 
-        if removable_index is None:
-            break
+    result: list[ChatModelMessage] = []
+    for index, message in enumerate(trimmed):
+        if not removed_flags[index]:
+            result.append(message)
 
-        removed = trimmed.pop(removable_index)
-        tokens -= _estimate_tokens(removed.get("content", ""))
-
-    return trimmed
+    return result
 
 
 def _replace_system_prompt(
@@ -428,6 +434,7 @@ class VectorStoreGateway:
         self._client = client
         self._ttl_seconds = ttl_seconds
         self._cached: tuple[float, list[dict[str, Any]]] | None = None
+        self._file_cache: dict[str, tuple[float, tuple[dict[str, Any], str]]] = {}
 
     def list_files(self) -> list[dict[str, Any]]:
         if not self._client.config.can_use_vector_store:
@@ -440,9 +447,19 @@ class VectorStoreGateway:
         return files
 
     def fetch_file(self, file_id: str) -> tuple[dict[str, Any], str]:
+        if not self._client.config.can_use_vector_store:
+            return {}, ""
+
+        now = time.monotonic()
+        cached = self._file_cache.get(file_id)
+        if cached and now - cached[0] < self._ttl_seconds:
+            return cached[1]
+
         meta = self._client.fetch_vector_meta(file_id)
         content = self._client.fetch_vector_content(file_id)
-        return meta, content
+        result = (meta, content)
+        self._file_cache[file_id] = (now, result)
+        return result
 
 
 VECTOR_STORE = VectorStoreGateway(CLIENT, ttl_seconds=CONFIG.cache_ttl)
