@@ -7,31 +7,66 @@ from typing import Any, Sequence
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import CONFIG, AppConfig
-from .conversation import (
-    ChatHistoryItem,
-    ChatModelMessage,
-    build_conversation_messages,
-    coerce_timestamp,
-    extract_last_user_content,
-    merge_histories,
-    messages_to_responses_input,
-    normalize_messages_for_model,
-    normalize_question,
-    replace_system_prompt,
-    sanitize_history_messages,
-    to_bool,
-    trim_messages_for_model,
-)
-from .rag import (
-    CLIENT as RAG_CLIENT,
-    SYSTEM_PROMPT_RAG,
-    VECTOR_STORE as RAG_VECTOR_STORE,
-    ask_with_vector_store_context as rag_ask_with_vector_store_context,
-    build_context_from_vector_store as rag_build_context_from_vector_store,
-    rag_via_responses as rag_rag_via_responses,
-)
-from .redis_gateway import REDIS_MAX_MESSAGES, RedisHistoryGateway, create_redis_client
+if __package__:
+    from .config import CONFIG, AppConfig
+    from .conversation import (
+        ChatHistoryItem,
+        ChatModelMessage,
+        build_conversation_messages,
+        coerce_timestamp,
+        extract_last_user_content,
+        merge_histories,
+        messages_to_responses_input,
+        normalize_messages_for_model,
+        normalize_question,
+        replace_system_prompt,
+        sanitize_history_messages,
+        to_bool,
+        trim_messages_for_model,
+    )
+    from .rag import (
+        CLIENT as RAG_CLIENT,
+        SYSTEM_PROMPT_RAG,
+        VECTOR_STORE as RAG_VECTOR_STORE,
+        ask_with_vector_store_context as rag_ask_with_vector_store_context,
+        build_context_from_vector_store as rag_build_context_from_vector_store,
+        rag_via_responses as rag_rag_via_responses,
+    )
+    from .redis_gateway import (
+        REDIS_MAX_MESSAGES,
+        RedisHistoryGateway,
+        create_redis_client,
+    )
+else:
+    from config import CONFIG, AppConfig
+    from conversation import (
+        ChatHistoryItem,
+        ChatModelMessage,
+        build_conversation_messages,
+        coerce_timestamp,
+        extract_last_user_content,
+        merge_histories,
+        messages_to_responses_input,
+        normalize_messages_for_model,
+        normalize_question,
+        replace_system_prompt,
+        sanitize_history_messages,
+        to_bool,
+        trim_messages_for_model,
+    )
+    from rag import (
+        CLIENT as RAG_CLIENT,
+        SYSTEM_PROMPT_RAG,
+        VECTOR_STORE as RAG_VECTOR_STORE,
+        ask_with_vector_store_context as rag_ask_with_vector_store_context,
+        build_context_from_vector_store as rag_build_context_from_vector_store,
+        rag_via_responses as rag_rag_via_responses,
+    )
+    from redis_gateway import (
+        REDIS_MAX_MESSAGES,
+        RedisHistoryGateway,
+        create_redis_client,
+    )
 
 
 REDIS_GATEWAY = RedisHistoryGateway(
