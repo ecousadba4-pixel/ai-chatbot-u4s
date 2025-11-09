@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any, Sequence
@@ -25,6 +26,9 @@ else:
         replace_system_prompt,
         trim_messages_for_model,
     )
+
+logger = logging.getLogger(__name__)
+
 
 FILES_API = "https://rest-assistant.api.cloud.yandex.net/v1"
 RESPONSES_API = f"{FILES_API}/responses"
@@ -327,7 +331,7 @@ def build_context_from_vector_store(
 
         return "\n\n".join(snippets) if snippets else "Контекст пуст."
     except Exception as error:
-        print("build_context_from_vector_store ERROR:", error)
+        logger.exception("build_context_from_vector_store error")
         return "Контекст пуст."
 
 
@@ -372,8 +376,8 @@ def ask_with_vector_store_context(
 
     try:
         data = active_client.call_responses(payload)
-    except Exception as error:
-        print("Fallback Responses API error:", error)
+    except Exception:
+        logger.exception("Fallback Responses API error")
         return "Извините, сейчас не могу ответить. Попробуйте позже."
 
     answer = _extract_responses_text(data)
