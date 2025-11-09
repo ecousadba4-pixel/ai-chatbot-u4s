@@ -9,7 +9,7 @@ COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 
 # 2. Копируем код приложения
-COPY backend/app.py .
+COPY backend/ ./
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
