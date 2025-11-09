@@ -1,4 +1,3 @@
-# scripts/refresh_vector_store_files.py
 import os
 import time
 import json
@@ -14,7 +13,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - fallback для сред без requests
     requests = None  # type: ignore[assignment]
 
-BASE_URL = "https://rest-assistant.api.cloud.yandex.net/v1"
+# Используем Files & Vector Store API, а не Assistant API
+BASE_URL = "https://assistant.api.cloud.yandex.net/foundation-models/v1"
 FILES_BASE_URL = "https://assistant.api.cloud.yandex.net/foundation-models/v1"
 
 
@@ -98,127 +98,33 @@ def _http_get_json(
     return status_code, text, content_type, data
 
 
-def update_chunking_strategy(
-    *,
-    api_key: str,
-    folder_id: str,
-    search_index_id: str,
-    max_chunk_tokens: int,
-    overlap_tokens: int,
-) -> None:
-    """Вызывает SearchIndex.Update для настройки чанков."""
-
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "x-folder-id": folder_id,
-        "Content-Type": "application/json",
-    }
-    attempts = [
-        (
-            "searchIndexes:update",
-            f"{BASE_URL}/searchIndexes:update",
-            {
-                "searchIndexId": search_index_id,
-                "updateMask": "chunking_strategy.static_strategy",
-                "chunkingStrategy": {
-                    "staticStrategy": {
-                        "maxChunkSizeTokens": max_chunk_tokens,
-                        "chunkOverlapTokens": overlap_tokens,
-                    }
-                },
-            },
-        ),
-        (
-            "searchIndexes/{id}:update",
-            f"{BASE_URL}/searchIndexes/{search_index_id}:update",
-            {
-                "updateMask": "chunking_strategy.static_strategy",
-                "searchIndex": {
-                    "chunkingStrategy": {
-                        "staticStrategy": {
-                            "maxChunkSizeTokens": max_chunk_tokens,
-                            "chunkOverlapTokens": overlap_tokens,
-                        }
-                    }
-                },
-            },
-        ),
-    ]
-
-    print("\n🧱 Обновляю параметры разбивки на чанки…")
-    last_error = None
-
-    for idx, (label, url, payload) in enumerate(attempts):
-        status_code, body, content_type, data = _http_post_json(
-            url,
-            headers,
-            payload,
-            timeout=60,
-        )
-
-        if status_code < 300:
-            if not isinstance(data, dict) and content_type.startswith("application/json"):
-                data = {}
-            status = None
-            if isinstance(data, dict):
-                status = data.get("status")
-                if not status and isinstance(data.get("searchIndex"), dict):
-                    status = data["searchIndex"].get("status")
-            print(
-                "   ✅ Параметры чанков обновлены"
-                + (f" (status={status})" if status else "")
-            )
-            return
-
-        last_error = (label, status_code, body)
-        if status_code == 404 and idx + 1 < len(attempts):
-            print(
-                f"   ⚠️ {label} вернул 404, пробую альтернативный endpoint…"
-            )
-            continue
-
-        break
-
-    if last_error is None:
-        raise RuntimeError("SearchIndex.Update не удалось по неизвестной причине")
-
-    label, status_code, body = last_error
-    raise RuntimeError(
-        f"SearchIndex.Update ({label}) HTTP {status_code}: {body[:500]}"
-    )
-
 def mask(s: str, keep=4):
     if not s:
         return ""
     return (s[:keep] + "…" + s[-keep:]) if len(s) > keep * 2 else "…"
 
-def _search_index_headers(api_key: str, folder_id: str) -> Dict[str, str]:
+
+def _vector_store_headers(api_key: str, folder_id: str) -> Dict[str, str]:
     return {
         "Authorization": f"Api-Key {api_key}",
         "x-folder-id": folder_id,
     }
 
 
-def _unwrap_search_index(data: Dict[str, Any]) -> Dict[str, Any]:
-    if "searchIndex" in data and isinstance(data["searchIndex"], dict):
-        return data["searchIndex"]
-    return data
-
-
-def get_search_index(api_key: str, folder_id: str, search_index_id: str) -> Dict[str, Any]:
-    url = f"{BASE_URL}/searchIndexes/{search_index_id}"
+def get_vector_store(api_key: str, folder_id: str, vs_id: str) -> Dict[str, Any]:
+    url = f"{BASE_URL}/vectorStores/{vs_id}"
     status_code, body, _, data = _http_get_json(
         url,
-        _search_index_headers(api_key, folder_id),
+        _vector_store_headers(api_key, folder_id),
         timeout=60,
     )
     if status_code >= 300:
         raise RuntimeError(
-            f"Не удалось получить SearchIndex {search_index_id}: HTTP {status_code}: {body[:500]}"
+            f"Не удалось получить VectorStore {vs_id}: HTTP {status_code}: {body[:500]}"
         )
     if not isinstance(data, dict):
-        raise RuntimeError("Ответ searchIndexes/get не является JSON-объектом")
-    return _unwrap_search_index(data)
+        raise RuntimeError("Ответ vectorStores/get не является JSON-объектом")
+    return data
 
 
 def wait_ready(
@@ -229,25 +135,25 @@ def wait_ready(
     timeout_sec: int = 900,
     poll_sec: int = 2,
 ) -> None:
-    print("⏳ Ожидаю готовности индекса…")
+    print("⏳ Ожидаю готовности векторного хранилища…")
     t0 = time.time()
     while True:
-        cur = get_search_index(api_key, folder_id, vs_id)
+        cur = get_vector_store(api_key, folder_id, vs_id)
         status = (cur.get("status") or "").lower() if isinstance(cur, dict) else ""
         if status in {"completed", "ready", "succeeded"}:
             print(f"  ✅ Готово: {vs_id} (status={status})")
             return
         if status in {"failed", "error"}:
-            raise RuntimeError(f"Индекс не собрался: {json.dumps(cur, ensure_ascii=False)}")
+            raise RuntimeError(f"Хранилище не собралось: {json.dumps(cur, ensure_ascii=False)}")
         if time.time() - t0 > timeout_sec:
             raise TimeoutError(f"Не дождался готовности за {timeout_sec} c")
         time.sleep(poll_sec)
 
 
-def _collect_file_ids(index_data: Dict[str, Any]) -> List[str]:
+def _collect_file_ids(store_data: Dict[str, Any]) -> List[str]:
     candidates: Iterable[Any] = []
     for key in ("files", "sourceFiles", "attachedFiles"):
-        items = index_data.get(key)
+        items = store_data.get(key)
         if isinstance(items, list):
             candidates = items
             break
@@ -265,14 +171,14 @@ def _collect_file_ids(index_data: Dict[str, Any]) -> List[str]:
     return ids
 
 
-def remove_files(api_key: str, folder_id: str, search_index_id: str, file_ids: List[str]) -> None:
+def remove_files(api_key: str, folder_id: str, vs_id: str, file_ids: List[str]) -> None:
     if not file_ids:
         return
     payload = {"fileIds": file_ids}
-    url = f"{BASE_URL}/searchIndexes/{search_index_id}:removeFiles"
+    url = f"{BASE_URL}/vectorStores/{vs_id}:removeFiles"
     status_code, body, _, _ = _http_post_json(
         url,
-        _search_index_headers(api_key, folder_id),
+        _vector_store_headers(api_key, folder_id),
         payload,
         timeout=60,
     )
@@ -282,12 +188,12 @@ def remove_files(api_key: str, folder_id: str, search_index_id: str, file_ids: L
         )
 
 
-def add_file_to_index(api_key: str, folder_id: str, search_index_id: str, file_id: str) -> None:
+def add_file_to_vector_store(api_key: str, folder_id: str, vs_id: str, file_id: str) -> None:
     payload = {"fileIds": [file_id]}
-    url = f"{BASE_URL}/searchIndexes/{search_index_id}:addFiles"
+    url = f"{BASE_URL}/vectorStores/{vs_id}:addFiles"
     status_code, body, _, _ = _http_post_json(
         url,
-        _search_index_headers(api_key, folder_id),
+        _vector_store_headers(api_key, folder_id),
         payload,
         timeout=60,
     )
@@ -327,8 +233,9 @@ def upload_file(api_key: str, folder_id: str, src: Path) -> Tuple[str, str]:
         raise RuntimeError("В ответе на загрузку файла нет идентификатора")
     return file_id, mime
 
+
 def main():
-    ap = argparse.ArgumentParser(description="Soft-refresh files in Yandex AI Studio Vector Store")
+    ap = argparse.ArgumentParser(description="Refresh files in Yandex AI Studio Vector Store (vectorStores API)")
     ap.add_argument(
         "--vs-id",
         help="vector_store_id (можно задать через переменную окружения VECTOR_STORE_ID)",
@@ -336,8 +243,6 @@ def main():
     ap.add_argument("--kb", required=True, help="Путь к kb.jsonl")
     ap.add_argument("--folder-id", required=True, help="YANDEX_FOLDER_ID")
     ap.add_argument("--timeout", type=int, default=900)
-    ap.add_argument("--chunk-size", type=int, default=512, help="Размер чанка в токенах")
-    ap.add_argument("--chunk-overlap", type=int, default=128, help="Перекрытие чанков в токенах")
     args = ap.parse_args()
 
     vs_id_env = os.environ.get("VECTOR_STORE_ID", "").strip()
@@ -361,25 +266,17 @@ def main():
     print(f"🔐 FOLDER      : {args.folder_id}")
     print(f"🔑 KEY         : {mask(api_key)}")
 
-    # Проверка стора
-    vs = get_search_index(api_key, args.folder_id, vs_id)
+    # Проверка хранилища
+    vs = get_vector_store(api_key, args.folder_id, vs_id)
     name = ""
     if isinstance(vs, dict):
         name = str(vs.get("name", ""))
     status = str(vs.get("status", "unknown")) if isinstance(vs, dict) else "unknown"
-    print(f"   ✅ Найден стор: name={name}, status={status}")
-
-    update_chunking_strategy(
-        api_key=api_key,
-        folder_id=args.folder_id,
-        search_index_id=vs_id,
-        max_chunk_tokens=args.chunk_size,
-        overlap_tokens=args.chunk_overlap,
-    )
+    print(f"   ✅ Найдено хранилище: name={name}, status={status}")
 
     # Удаляем старые файлы
-    print("\n🧹 Удаляю старые файлы из стора…")
-    current_vs = get_search_index(api_key, args.folder_id, vs_id)
+    print("\n🧹 Удаляю старые файлы из хранилища…")
+    current_vs = get_vector_store(api_key, args.folder_id, vs_id)
     existing_file_ids = _collect_file_ids(current_vs if isinstance(current_vs, dict) else {})
     if existing_file_ids:
         try:
@@ -388,16 +285,16 @@ def main():
         except Exception as err:
             print(f"   ⚠️ Ошибка при удалении: {err}")
     else:
-        print("   ℹ️  Стор пуст, удалять нечего")
+        print("   ℹ️  Хранилище пусто, удалять нечего")
 
     # Загружаем новый kb.jsonl
     print("\n📂 Загружаю новый kb.jsonl в AI Studio Files…")
     file_id, used_mime = upload_file(api_key, args.folder_id, kb_file)
     print(f"   ✅ Загружен: file_id={file_id}, mime={used_mime}")
 
-    # Привязываем к сто́ру
+    # Привязываем к хранилищу
     print("\n➕ Привязываю файл к Vector Store…")
-    add_file_to_index(api_key, args.folder_id, vs_id, file_id)
+    add_file_to_vector_store(api_key, args.folder_id, vs_id, file_id)
     print("   ✅ Файл привязан, началась индексация")
 
     # Ждем готовности
@@ -405,6 +302,7 @@ def main():
 
     print("\n🎉 Готово! Vector Store обновлён и сохранил тот же ID.")
     print(f"vector_store_id = {vs_id}")
+
 
 if __name__ == "__main__":
     main()
