@@ -11,12 +11,20 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .redis_gateway import (
-    REDIS_MAX_MESSAGES,
-    RedisHistoryGateway,
-    create_redis_client,
-    parse_redis_args,
-)
+try:  # pragma: no cover - поддержка запуска без пакета
+    from .redis_gateway import (
+        REDIS_MAX_MESSAGES,
+        RedisHistoryGateway,
+        create_redis_client,
+        parse_redis_args,
+    )
+except ImportError:  # pragma: no cover - когда модуль запускают напрямую
+    from redis_gateway import (  # type: ignore
+        REDIS_MAX_MESSAGES,
+        RedisHistoryGateway,
+        create_redis_client,
+        parse_redis_args,
+    )
 
 FILES_API = "https://rest-assistant.api.cloud.yandex.net/v1"
 RESPONSES_API = f"{FILES_API}/responses"
