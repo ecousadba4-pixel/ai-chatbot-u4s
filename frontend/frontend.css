@@ -23,8 +23,14 @@
 @media (max-width:480px){ #u4s-chat{ right:12px; bottom:88px; width:calc(100vw - 24px); max-height:76vh } #u4s-fab{ right:12px; bottom:12px } }
 #u4s-head{ background:linear-gradient(180deg, var(--u4s-primary), #6E7E3D); color:#fff; padding:14px 16px; display:flex; align-items:center; gap:10px }
 #u4s-head .u4s-avatar{ width:32px; height:32px; border-radius:50%; background:#fff2; display:grid; place-items:center; box-shadow:inset 0 0 0 1px #ffffff33 }
+#u4s-head .u4s-head-text{ flex:1; min-width:0 }
 #u4s-head .u4s-title{ font:600 15px/1.1 system-ui, -apple-system, "Segoe UI", Roboto, Arial }
 #u4s-head .u4s-sub{ font:12px/1.2 system-ui, -apple-system, "Segoe UI"; opacity:.9 }
+#u4s-reset{ border:0; border-radius:999px; padding:6px 12px; font:600 12px/1 system-ui, -apple-system, "Segoe UI"; color:var(--u4s-primary); background:#ffffffdd; cursor:pointer; box-shadow:0 0 0 1px rgba(255,255,255,.4); transition:opacity .15s, transform .15s }
+#u4s-reset:focus-visible{ outline:2px solid rgba(255,255,255,.9); outline-offset:2px }
+#u4s-reset:hover{ opacity:.85 }
+#u4s-reset:active{ transform:scale(.97) }
+#u4s-reset:disabled{ opacity:.6; cursor:not-allowed }
 #u4s-scroll{ padding:14px 12px; overflow:auto; background:var(--u4s-primary-ghost) }
 .u4s-msg{ max-width:84%; margin:6px 0; padding:10px 12px; border-radius:16px; font:14px/1.45 system-ui, -apple-system,"Segoe UI"; color:var(--u4s-text); background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04) }
 .u4s-me{ margin-left:auto; background:#fff; border:1px solid rgba(0,0,0,.06) }
