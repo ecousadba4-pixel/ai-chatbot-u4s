@@ -8,56 +8,39 @@ from typing import Any, Sequence
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-if __package__:
-    from .config import CONFIG, AppConfig
-    from .conversation import (
-        ChatHistoryItem,
-        ChatModelMessage,
-        build_conversation_messages,
-        merge_histories,
-        normalize_messages_for_model,
-        normalize_question,
-        sanitize_history_messages,
-        to_bool,
-    )
-    from .rag import (
-        CLIENT as RAG_CLIENT,
-        SYSTEM_PROMPT_RAG,
-        VECTOR_STORE as RAG_VECTOR_STORE,
-        ask_with_vector_store_context as rag_ask_with_vector_store_context,
-        build_context_from_vector_store as rag_build_context_from_vector_store,
-        rag_via_responses as rag_rag_via_responses,
-    )
-    from .redis_gateway import (
-        REDIS_MAX_MESSAGES,
-        RedisHistoryGateway,
-        create_redis_client,
-    )
-else:
-    from config import CONFIG, AppConfig
-    from conversation import (
-        ChatHistoryItem,
-        ChatModelMessage,
-        build_conversation_messages,
-        merge_histories,
-        normalize_messages_for_model,
-        normalize_question,
-        sanitize_history_messages,
-        to_bool,
-    )
-    from rag import (
-        CLIENT as RAG_CLIENT,
-        SYSTEM_PROMPT_RAG,
-        VECTOR_STORE as RAG_VECTOR_STORE,
-        ask_with_vector_store_context as rag_ask_with_vector_store_context,
-        build_context_from_vector_store as rag_build_context_from_vector_store,
-        rag_via_responses as rag_rag_via_responses,
-    )
-    from redis_gateway import (
-        REDIS_MAX_MESSAGES,
-        RedisHistoryGateway,
-        create_redis_client,
-    )
+from backend.config import CONFIG, AppConfig
+from backend.conversation import (
+    ChatHistoryItem,
+    ChatModelMessage,
+    build_conversation_messages,
+    merge_histories,
+    normalize_messages_for_model,
+    normalize_question,
+    sanitize_history_messages,
+    to_bool,
+)
+from backend.rag import (
+    CLIENT as RAG_CLIENT,
+    SYSTEM_PROMPT_RAG,
+    VECTOR_STORE as RAG_VECTOR_STORE,
+    ask_with_vector_store_context as rag_ask_with_vector_store_context,
+    build_context_from_vector_store as rag_build_context_from_vector_store,
+    rag_via_responses as rag_rag_via_responses,
+)
+from backend.redis_gateway import (
+    REDIS_MAX_MESSAGES,
+    RedisHistoryGateway,
+    create_redis_client,
+)
+
+from .chat.handlers import BookingIntentHandler
+from .dialogue.manager import BookingDialogueManager
+from .dialogue.state import (
+    BRANCH_BOOKING_PRICE_CHAT,
+    BRANCH_ONLINE_BOOKING_REDIRECT,
+    INTENT_BOOKING_INQUIRY,
+)
+from .services import ShelterCloudConfig, ShelterCloudService
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +53,19 @@ EMPTY_QUESTION_ANSWER = "Пожалуйста, сформулируйте воп
 REDIS_GATEWAY = RedisHistoryGateway(
     create_redis_client(CONFIG.redis_url, CONFIG.redis_args)
 )
+
+SHELTER_CLOUD_CONFIG = ShelterCloudConfig(
+    base_url=CONFIG.shelter_cloud_base_url,
+    client_id=CONFIG.shelter_cloud_client_id,
+    client_secret=CONFIG.shelter_cloud_client_secret,
+    timeout=CONFIG.http_timeout,
+)
+SHELTER_CLOUD_SERVICE = ShelterCloudService(SHELTER_CLOUD_CONFIG)
+BOOKING_DIALOGUE_MANAGER = BookingDialogueManager(
+    storage=REDIS_GATEWAY,
+    service=SHELTER_CLOUD_SERVICE,
+)
+BOOKING_INTENT_HANDLER = BookingIntentHandler(BOOKING_DIALOGUE_MANAGER)
 
 app = FastAPI(title="U4S Chat API")
 
@@ -98,6 +94,33 @@ def ask_with_vector_store_context(messages: Sequence[ChatModelMessage]) -> str:
 
 def build_context_from_vector_store(question: str) -> str:
     return rag_build_context_from_vector_store(question, vector_store=VECTOR_STORE)
+
+
+def _booking_handler() -> BookingIntentHandler:
+    BOOKING_DIALOGUE_MANAGER.storage = REDIS_GATEWAY
+    return BOOKING_INTENT_HANDLER
+
+
+def _persist_history(
+    session_id: str,
+    merged_history: list[ChatHistoryItem],
+    question: str,
+    answer: str,
+    *,
+    limit: int,
+) -> None:
+    if not session_id:
+        return
+    now = time.time()
+    stored_history = merged_history + [
+        {"role": "user", "content": question, "timestamp": now},
+        {
+            "role": "assistant",
+            "content": str(answer).strip(),
+            "timestamp": now + 1e-3,
+        },
+    ]
+    REDIS_GATEWAY.write_history(session_id, stored_history[-limit:])
 
 
 def _produce_answer(messages: Sequence[ChatModelMessage], *, log_prefix: str) -> str:
@@ -217,6 +240,24 @@ async def chat_post(request: Request) -> dict[str, str]:
     if not normalized_question:
         return {"answer": EMPTY_QUESTION_ANSWER}
 
+    booking_result = _booking_handler().handle(session_id, normalized_question)
+    if booking_result.handled and booking_result.answer is not None:
+        answer_text = booking_result.answer
+        if session_id:
+            _persist_history(
+                session_id,
+                merged_history,
+                normalized_question,
+                answer_text,
+                limit=history_limit,
+            )
+        response_payload: dict[str, str] = {"answer": answer_text}
+        if booking_result.intent:
+            response_payload["intent"] = booking_result.intent
+        if booking_result.branch:
+            response_payload["branch"] = booking_result.branch
+        return response_payload
+
     try:
         answer = _produce_answer(normalized_messages, log_prefix="POST")
     except Exception:
@@ -224,17 +265,13 @@ async def chat_post(request: Request) -> dict[str, str]:
         return {"answer": DEFAULT_ERROR_ANSWER}
     else:
         if session_id:
-            now = time.time()
-            stored_history = merged_history + [
-                {"role": "user", "content": normalized_question, "timestamp": now},
-                {
-                    "role": "assistant",
-                    "content": str(answer).strip(),
-                    "timestamp": now + 1e-3,
-                },
-            ]
-            stored_history = stored_history[-history_limit:]
-            REDIS_GATEWAY.write_history(session_id, stored_history)
+            _persist_history(
+                session_id,
+                merged_history,
+                normalized_question,
+                str(answer),
+                limit=history_limit,
+            )
 
         return {"answer": answer}
 
@@ -246,6 +283,7 @@ async def chat_reset(request: Request) -> dict[str, bool]:
 
     if session_id:
         REDIS_GATEWAY.delete_history(session_id)
+        BOOKING_DIALOGUE_MANAGER.reset(session_id)
 
     return {"ok": True}
 
