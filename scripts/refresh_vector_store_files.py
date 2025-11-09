@@ -69,7 +69,9 @@ def update_chunking_strategy(*, api_key: str, folder_id: str, search_index_id: s
                              max_chunk_tokens: int, overlap_tokens: int) -> None:
     """Вызывает SearchIndex.Update для настройки чанков."""
 
-    url = f"{BASE_URL}/searchIndices:update"
+    # Согласно рекомендациям API SearchIndex.Update используем plural "searchIndexes"
+    # и обязательно передаём updateMask, чтобы явно указать изменяемые поля.
+    url = f"{BASE_URL}/searchIndexes:update"
     headers = {
         "Authorization": f"Api-Key {api_key}",
         "x-folder-id": folder_id,
@@ -77,6 +79,7 @@ def update_chunking_strategy(*, api_key: str, folder_id: str, search_index_id: s
     }
     payload = {
         "searchIndexId": search_index_id,
+        "updateMask": "chunking_strategy.static_strategy",
         "chunkingStrategy": {
             "staticStrategy": {
                 "maxChunkSizeTokens": max_chunk_tokens,
