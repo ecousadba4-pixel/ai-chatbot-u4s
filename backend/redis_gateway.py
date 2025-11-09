@@ -73,14 +73,21 @@ def parse_redis_args(raw: str | None) -> dict[str, Any]:
 def create_redis_client(
     redis_url: str | None, redis_args: dict[str, Any] | None
 ) -> "redis.Redis | None":
-    if redis is None or not redis_url:
+    if redis is None:
         return None
+
+    url = (redis_url or "").strip()
+    if not url:
+        return None
+
+    if "://" not in url and not url.startswith("/"):
+        url = f"redis://{url}"
 
     extra_args = dict(redis_args or {})
     extra_args.setdefault("decode_responses", True)
 
     try:
-        return redis.Redis.from_url(redis_url, **extra_args)
+        return redis.Redis.from_url(url, **extra_args)
     except Exception as error:  # pragma: no cover - защититься от ошибок конфига
         print("Redis init error:", error)
         return None

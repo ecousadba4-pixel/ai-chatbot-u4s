@@ -1,9 +1,10 @@
 import asyncio
 import time
+from typing import Any
 
 import pytest
 
-from backend.redis_gateway import REDIS_MAX_MESSAGES, parse_redis_args
+import backend.redis_gateway as redis_gateway_module
 
 from backend.tests._helpers import DummyClient, DummyRedisGateway, DummyRequest
 
@@ -60,7 +61,28 @@ def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
     ],
 )
 def test_parse_redis_args_handles_multiple_formats(raw, expected):
-    assert parse_redis_args(raw) == expected
+    assert redis_gateway_module.parse_redis_args(raw) == expected
+
+
+def test_create_redis_client_adds_default_scheme(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class DummyRedis:
+        @staticmethod
+        def from_url(url: str, **kwargs: Any) -> str:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return "client"
+
+    dummy_module = type("DummyRedisModule", (), {"Redis": DummyRedis})
+    monkeypatch.setattr(redis_gateway_module, "redis", dummy_module)
+
+    client = redis_gateway_module.create_redis_client("internal-redis:6379", {"db": 2})
+
+    assert client == "client"
+    assert captured["url"] == "redis://internal-redis:6379"
+    assert captured["kwargs"]["db"] == 2
+    assert captured["kwargs"]["decode_responses"] is True
 
 
 def test_chat_post_merges_and_persists_history(app_module, monkeypatch):
