@@ -300,12 +300,20 @@ def rag_via_responses(question: str) -> str:
             },
             {"role": "user", "content": [{"type": "input_text", "text": question}]},
         ],
-        "tools": [{"type": "file_search"}],
+        "tools": [
+            {"type": "file_search"},
+            {"type": "web_search"},
+        ],
         "tool_resources": {
             "file_search": {
                 "vector_store_ids": [CONFIG.vector_store_id],
                 "top_k": 8,
-            }
+            },
+            "web_search": {
+                "gen_search_options": {
+                    "host_filters": ["usadba4.ru"],
+                }
+            },
         },
         "temperature": 0.3,
         "top_p": 0.8,
