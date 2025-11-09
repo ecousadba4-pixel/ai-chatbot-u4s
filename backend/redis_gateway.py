@@ -98,6 +98,10 @@ class RedisHistoryGateway:
         self._ttl_seconds = int(ttl_seconds)
         self._max_messages = max(1, int(max_messages))
 
+    @property
+    def max_messages(self) -> int:
+        return self._max_messages
+
     def _key(self, session_id: str) -> str | None:
         session = (session_id or "").strip()
         if not session:
@@ -151,4 +155,15 @@ class RedisHistoryGateway:
             self._client.setex(key, ttl_seconds, payload)
         except Exception as error:  # pragma: no cover - логируем и идем дальше
             print("Redis write_history error:", error)
+
+    def delete_history(self, session_id: str) -> None:
+        if not self._client:
+            return
+        key = self._key(session_id)
+        if not key:
+            return
+        try:
+            self._client.delete(key)
+        except Exception as error:  # pragma: no cover - логируем и идем дальше
+            print("Redis delete_history error:", error)
 
