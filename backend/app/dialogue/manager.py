@@ -80,8 +80,8 @@ class BookingDialogueManager:
             return DialogueResult(
                 True,
                 (
-                    "Отлично, помогу с подбором номера. Укажите дату заезда "
-                    "(например: 25.11.2025, 25-11-2025, 25 ноября 2025, завтра)."
+                    "Когда планируете заехать?\n"
+                    "Укажите дату в удобном для вас формате."
                 ),
                 context.intent,
                 context.branch,
@@ -124,6 +124,8 @@ class BookingDialogueManager:
         context.branch = BRANCH_BOOKING_PRICE_CHAT
         context.state = STATE_WAIT_CHECK_IN
         context.booking.children_ages = []
+        context.cached_offers = []
+        context.last_offer_index = -1
         return context
 
     def _load_context(self, session_id: str) -> DialogueContext:
@@ -178,9 +180,8 @@ class BookingDialogueManager:
         context.booking.check_in = parsed_date.isoformat()
         context.state = STATE_WAIT_CHECK_OUT
         return (
-            "Спасибо! Теперь укажите дату выезда (можно писать 28.11.2025, 28-11-2025, "
-            "28 ноября 2025, завтра, в эту пятницу) или напишите, на сколько ночей "
-            "бронируете."
+            "Отлично! 😊 А до какого числа планируете остаться — "
+            "или на сколько ночей хотите забронировать?"
         )
 
     def _handle_check_out(self, context: DialogueContext, question: str) -> str | None:
@@ -251,16 +252,38 @@ class BookingDialogueManager:
         return self._finalize(context)
 
     def _handle_complete(self, context: DialogueContext, question: str) -> str | None:
+        lower_question = question.lower()
+        if self._wants_more_offers(lower_question):
+            offers = context.cached_offers or []
+            next_index = context.last_offer_index + 1
+            if next_index < len(offers):
+                context.last_offer_index = next_index
+                offer = offers[next_index]
+                breakfast_note = (
+                    "завтрак включён" if offer.get("breakfast_included") else "завтрак не включён"
+                )
+                price_text = self._format_price(offer.get("price"), offer.get("currency"))
+                return (
+                    f"Нашла ещё вариант: {self._offer_name(offer)} — {price_text}, {breakfast_note}. "
+                    "Сообщите, если хотите продолжить бронирование или перейти в онлайн-модуль."
+                )
+            if offers:
+                return (
+                    "Пока это все доступные предложения на выбранные даты. "
+                    "Могу подобрать новые варианты — укажите другие даты или условия бронирования."
+                )
         # если в завершённом состоянии снова спросили про бронирование, перезапустим диалог
-        if self._should_start_new_dialogue(context, question.lower()):
+        if self._should_start_new_dialogue(context, lower_question):
             new_context = self._start_dialogue()
             context.intent = new_context.intent
             context.branch = new_context.branch
             context.state = new_context.state
             context.booking = new_context.booking
+            context.cached_offers = new_context.cached_offers
+            context.last_offer_index = new_context.last_offer_index
             return (
-                "Готова подобрать новое бронирование. Укажите дату заезда "
-                "(например: 25.11.2025, 25-11-2025, 25 ноября 2025 или завтра)."
+                "Когда планируете заехать?\n"
+                "Укажите дату в удобном для вас формате."
             )
         return None
 
@@ -300,12 +323,14 @@ class BookingDialogueManager:
                 "Попробуйте изменить параметры или воспользоваться онлайн-бронированием."
             )
 
+        context.cached_offers = offers
+        context.last_offer_index = 0
         offer = offers[0]
         context.branch = BRANCH_BOOKING_PRICE_CHAT
         breakfast_note = "завтрак включён" if offer.get("breakfast_included") else "завтрак не включён"
         price_text = self._format_price(offer.get("price"), offer.get("currency"))
         return (
-            f"Нашла вариант: {offer.get('name', 'номер')} — {price_text}, {breakfast_note}. "
+            f"Нашла вариант: {self._offer_name(offer)} — {price_text}, {breakfast_note}. "
             "Сообщите, если хотите продолжить бронирование или перейти в онлайн-модуль."
         )
 
@@ -316,6 +341,18 @@ class BookingDialogueManager:
             "Вы можете оформить бронирование самостоятельно в модуле онлайн-бронирования на сайте. "
             "Если понадобится помощь — я рядом!"
         )
+
+    @staticmethod
+    def _offer_name(offer: dict[str, Any]) -> str:
+        name = offer.get("name")
+        return str(name) if name else "номер"
+
+    @staticmethod
+    def _wants_more_offers(lower_question: str) -> bool:
+        if not lower_question:
+            return False
+        tokens = ("ещё", "еще", "больше", "другие", "вариант", "покаж", "покажи")
+        return any(token in lower_question for token in tokens)
 
     @staticmethod
     def _extract_date(question: str) -> dt.date | None:

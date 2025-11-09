@@ -64,6 +64,8 @@ class DialogueContext:
     branch: str | None = None
     state: str = STATE_IDLE
     booking: BookingData = field(default_factory=BookingData)
+    cached_offers: list[dict[str, Any]] = field(default_factory=list)
+    last_offer_index: int = -1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +73,8 @@ class DialogueContext:
             "branch": self.branch,
             "state": self.state,
             "booking": self.booking.to_dict(),
+            "cached_offers": list(self.cached_offers),
+            "last_offer_index": self.last_offer_index,
         }
 
     @classmethod
@@ -81,11 +85,21 @@ class DialogueContext:
             booking = BookingData.from_dict(booking_payload)
         else:
             booking = BookingData()
+        last_offer_index_value = payload.get("last_offer_index")
+        if last_offer_index_value is None:
+            normalized_last_index = -1
+        else:
+            try:
+                normalized_last_index = int(last_offer_index_value)
+            except (TypeError, ValueError):
+                normalized_last_index = -1
         return cls(
             intent=str(payload.get("intent", "")),
             branch=payload.get("branch"),
             state=str(payload.get("state", STATE_IDLE)),
             booking=booking,
+            cached_offers=list(payload.get("cached_offers") or []),
+            last_offer_index=normalized_last_index,
         )
 
     def reset(self) -> None:
@@ -93,3 +107,5 @@ class DialogueContext:
         self.branch = None
         self.state = STATE_IDLE
         self.booking = BookingData()
+        self.cached_offers = []
+        self.last_offer_index = -1

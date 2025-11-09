@@ -50,14 +50,14 @@ def test_booking_flow_success(app_module, monkeypatch):
         )
     )
 
-    assert response["answer"].startswith("Отлично, помогу")
+    assert response["answer"].startswith("Когда планируете заехать?")
     assert response["intent"] == "booking_inquiry"
     assert response["branch"] == "booking_price_chat"
 
     response = asyncio.run(
         app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "Заезд 10.10.2024"}))
     )
-    assert "дату выезда" in response["answer"].lower()
+    assert "до какого числа планируете остаться" in response["answer"].lower()
 
     response = asyncio.run(
         app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "Выезд 12.10.2024"}))
@@ -81,6 +81,7 @@ def test_booking_flow_success(app_module, monkeypatch):
     assert "нашла вариант" in response["answer"].lower()
     assert "12 345" in response["answer"]
     assert "завтрак включён" in response["answer"].lower()
+    assert "Стандарт" in response["answer"]
     assert response["branch"] == "booking_price_chat"
 
     assert service.calls
@@ -147,7 +148,7 @@ def test_booking_accepts_various_date_formats(app_module, monkeypatch):
             DummyRequest({"sessionId": session_id, "question": "заезд 25 ноября 2025"})
         )
     )
-    assert "дату выезда" in response["answer"].lower()
+    assert "до какого числа планируете остаться" in response["answer"].lower()
 
     response = asyncio.run(
         app_module.chat_post(
@@ -185,7 +186,7 @@ def test_booking_accepts_relative_dates(app_module, monkeypatch):
             DummyRequest({"sessionId": session_id, "question": "завтра"})
         )
     )
-    assert "дату выезда" in response["answer"].lower()
+    assert "до какого числа планируете остаться" in response["answer"].lower()
 
     response = asyncio.run(
         app_module.chat_post(
@@ -256,3 +257,69 @@ def test_booking_online_redirect_branch(app_module, monkeypatch):
 
     assert "онлайн-бронир" in response["answer"].lower()
     assert response["branch"] == "online_booking_redirect"
+
+
+def test_booking_more_offer_requests(app_module, monkeypatch):
+    redis_gateway, service = _prepare_booking(
+        app_module,
+        monkeypatch,
+        offers=[
+            {
+                "name": "Стандарт",
+                "price": 10000,
+                "currency": "RUB",
+                "breakfast_included": True,
+            },
+            {
+                "name": "Люкс",
+                "price": 15000,
+                "currency": "RUB",
+                "breakfast_included": False,
+            },
+        ],
+    )
+
+    session_id = "more-offers"
+
+    asyncio.run(
+        app_module.chat_post(
+            DummyRequest({"sessionId": session_id, "question": "Нужно забронировать номер"})
+        )
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "10.12.2025"}))
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "12.12.2025"}))
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "2"}))
+    )
+    final_response = asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "0"}))
+    )
+
+    assert "Стандарт" in final_response["answer"]
+    assert final_response["branch"] == "booking_price_chat"
+
+    more_response = asyncio.run(
+        app_module.chat_post(
+            DummyRequest({"sessionId": session_id, "question": "покажи больше вариантов"})
+        )
+    )
+
+    assert "ещё вариант" in more_response["answer"].lower()
+    assert "Люкс" in more_response["answer"]
+    assert more_response["branch"] == "booking_price_chat"
+
+    no_more_response = asyncio.run(
+        app_module.chat_post(
+            DummyRequest({"sessionId": session_id, "question": "покажи больше вариантов"})
+        )
+    )
+
+    assert "все доступные предложения" in no_more_response["answer"].lower()
+    assert no_more_response["branch"] == "booking_price_chat"
+
+    context = redis_gateway.context_storage[session_id]
+    assert context["last_offer_index"] == 1
