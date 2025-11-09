@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from urllib.parse import urljoin
 
 import requests
@@ -188,7 +189,9 @@ class ShelterCloudService:
                         or meal_plan.get("includesBreakfast")
                     )
                 else:
-                    breakfast = bool(rate.get("breakfastIncluded") or rate.get("includesBreakfast"))
+                    breakfast = bool(
+                        rate.get("breakfastIncluded") or rate.get("includesBreakfast")
+                    )
 
                 offers.append(
                     {
@@ -201,10 +204,81 @@ class ShelterCloudService:
         return offers
 
 
+class ShelterCloudOfflineService:
+    """Простейшая офлайн-имитация Shelter Cloud."""
+
+    def __init__(
+        self,
+        offers: Sequence[dict[str, Any]] | None = None,
+    ) -> None:
+        self._offers = list(offers) if offers is not None else list(DEFAULT_OFFLINE_OFFERS)
+
+    @staticmethod
+    def is_configured() -> bool:
+        return True
+
+    def fetch_availability(
+        self,
+        *,
+        check_in: str,
+        check_out: str,
+        adults: int,
+        children: int,
+        children_ages: Iterable[int],
+    ) -> list[dict[str, Any]]:
+        nights = self._calc_nights(check_in, check_out)
+        guests = max(1, int(adults) + int(children))
+        offers: list[dict[str, Any]] = []
+        for offer in self._offers:
+            price_per_night = float(offer.get("price_per_night", offer.get("price", 0)) or 0)
+            total_price = max(price_per_night, 0.0) * max(nights, 1)
+            extra_fee = max(0, guests - 2) * float(offer.get("extra_guest_fee", 0) or 0)
+            adjusted_price = total_price + extra_fee
+            offers.append(
+                {
+                    "name": offer.get("name", "Номер"),
+                    "price": round(adjusted_price, 2) if adjusted_price else offer.get("price"),
+                    "currency": offer.get("currency", "RUB"),
+                    "breakfast_included": bool(offer.get("breakfast_included", True)),
+                }
+            )
+        offers.sort(key=lambda item: item.get("price", float("inf")))
+        return offers
+
+    @staticmethod
+    def _calc_nights(check_in: str, check_out: str) -> int:
+        try:
+            start = dt.date.fromisoformat(check_in)
+            end = dt.date.fromisoformat(check_out)
+        except ValueError:
+            return 1
+        delta = (end - start).days
+        return delta if delta > 0 else 1
+
+
+DEFAULT_OFFLINE_OFFERS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "Стандартный номер",
+        "price_per_night": 9900,
+        "currency": "RUB",
+        "breakfast_included": True,
+        "extra_guest_fee": 1200,
+    },
+    {
+        "name": "Семейный дом",
+        "price_per_night": 16800,
+        "currency": "RUB",
+        "breakfast_included": True,
+        "extra_guest_fee": 0,
+    },
+)
+
+
 __all__ = [
     "ShelterCloudService",
     "ShelterCloudConfig",
     "ShelterCloudError",
     "ShelterCloudAuthenticationError",
     "ShelterCloudAvailabilityError",
+    "ShelterCloudOfflineService",
 ]

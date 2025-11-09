@@ -4,6 +4,7 @@ from .shelter_cloud import (
     ShelterCloudAuthenticationError,
     ShelterCloudAvailabilityError,
     ShelterCloudConfig,
+    ShelterCloudOfflineService,
     ShelterCloudService,
 )
 
@@ -12,4 +13,5 @@ __all__ = [
     "ShelterCloudAvailabilityError",
     "ShelterCloudConfig",
     "ShelterCloudService",
+    "ShelterCloudOfflineService",
 ]

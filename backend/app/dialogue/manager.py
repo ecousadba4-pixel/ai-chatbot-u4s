@@ -20,10 +20,23 @@ from .state import (
     STATE_WAIT_CHILDREN,
     STATE_WAIT_CHILD_AGES,
 )
-from ..services import (
-    ShelterCloudAvailabilityError,
-    ShelterCloudService,
-)
+from ..services import ShelterCloudAvailabilityError
+
+
+class BookingAvailabilityService(Protocol):
+    def is_configured(self) -> bool:
+        ...
+
+    def fetch_availability(
+        self,
+        *,
+        check_in: str,
+        check_out: str,
+        adults: int,
+        children: int,
+        children_ages: list[int],
+    ) -> list[dict[str, Any]]:
+        ...
 
 
 class ContextStorage(Protocol):
@@ -47,7 +60,7 @@ class DialogueResult(NamedTuple):
 @dataclass
 class BookingDialogueManager:
     storage: ContextStorage
-    service: ShelterCloudService
+    service: BookingAvailabilityService
 
     def reset(self, session_id: str) -> None:
         self.storage.delete_context(session_id)
