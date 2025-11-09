@@ -1,11 +1,18 @@
 (() => {
   const DEFAULT_ENDPOINT = "https://ai-chatbot-u4s-karinausadba.amvera.io/api/chat";
   const STORAGE_KEY = "u4s_history_v1";
+  const SESSION_KEY = "u4s_session_v1";
   const SIZE_EVENT = "u4s-iframe-size";
   const EXTRA_PADDING = 12;
   const POST_DEBOUNCE_MS = 60;
   const BURST_PULSES = 12;
   const BURST_INTERVAL_MS = 400;
+  const INITIAL_GREETING =
+    "Здравствуйте! Я помогу с вопросами про проживание, ресторан «Калина Красная», баню, контакты и др.";
+  const CONNECTION_ERROR_MESSAGE =
+    "Не удалось связаться с сервером. Проверьте подключение и попробуйте снова.";
+  const RESET_ERROR_MESSAGE =
+    "Не удалось сбросить диалог. Проверьте подключение и попробуйте снова.";
 
   const doc = document;
   const root = doc.documentElement;
@@ -17,14 +24,69 @@
     scroll: doc.getElementById("u4s-scroll"),
     form: doc.getElementById("u4s-inputbar"),
     input: doc.getElementById("u4s-q"),
+    reset: doc.getElementById("u4s-reset"),
   };
 
-  if (!elements.fab || !elements.chat || !elements.scroll || !elements.form || !elements.input) {
+  if (!elements.fab || !elements.chat || !elements.scroll || !elements.form || !elements.input || !elements.reset) {
     console.warn("U4S widget: required DOM nodes are missing");
     return;
   }
 
   const timeFormatter = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
+
+  let memorySessionId = null;
+
+  function createUuid() {
+    if (typeof crypto !== "undefined") {
+      if (typeof crypto.randomUUID === "function") {
+        try {
+          return crypto.randomUUID();
+        } catch (_) {
+          /* noop */
+        }
+      }
+      if (typeof crypto.getRandomValues === "function") {
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+        return (
+          `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-` +
+          `${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`
+        );
+      }
+    }
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+      const rand = Math.floor(Math.random() * 16);
+      const value = char === "x" ? rand : (rand & 0x3) | 0x8;
+      return value.toString(16);
+    });
+  }
+
+  function ensureSessionId() {
+    if (memorySessionId) {
+      return memorySessionId;
+    }
+    let existing = "";
+    try {
+      existing = window.localStorage.getItem(SESSION_KEY) || "";
+    } catch (_) {
+      existing = "";
+    }
+    if (existing && existing.trim()) {
+      memorySessionId = existing.trim();
+      return memorySessionId;
+    }
+    const fresh = createUuid();
+    memorySessionId = fresh;
+    try {
+      window.localStorage.setItem(SESSION_KEY, fresh);
+    } catch (_) {
+      /* noop */
+    }
+    return fresh;
+  }
 
   function safeJsonParse(text) {
     try {
@@ -85,6 +147,7 @@
   }
 
   const ENDPOINT = resolveEndpoint();
+  const sessionId = ensureSessionId();
   const history = loadHistory();
 
   // ===== Авто-рост iframe =====
@@ -240,6 +303,39 @@
     schedulePostSize();
   }
 
+  function collectHistory(limit) {
+    const nodes = Array.from(elements.scroll.querySelectorAll(".u4s-msg"));
+    const items = nodes.map((node) => ({
+      role: node.dataset.role === "me" ? "user" : "assistant",
+      text: node.dataset.raw || node.textContent || "",
+    }));
+    if (typeof limit === "number" && Number.isFinite(limit)) {
+      const normalized = Math.max(0, Math.floor(limit));
+      return normalized > 0 ? items.slice(-normalized) : [];
+    }
+    return items;
+  }
+
+  function clearChatHistory() {
+    elements.scroll.replaceChildren();
+    persistHistory();
+  }
+
+  function restoreHistory(messages) {
+    elements.scroll.replaceChildren();
+    if (Array.isArray(messages)) {
+      messages.forEach((message) => {
+        if (!message || typeof message.text !== "string") return;
+        renderMessage({
+          role: message.role === "me" ? "me" : "bot",
+          text: message.text,
+          timestamp: message.timestamp,
+        });
+      });
+    }
+    persistHistory();
+  }
+
   function appendBotMessage(text) {
     renderMessage({ role: "bot", text });
     persistHistory();
@@ -261,9 +357,7 @@
       });
     });
   } else {
-    appendBotMessage(
-      "Здравствуйте! Я помогу с вопросами про проживание, ресторан «Калина Красная», баню, контакты и др.",
-    );
+    appendBotMessage(INITIAL_GREETING);
   }
 
   function toggleChat(open) {
@@ -295,11 +389,16 @@
     elements.input.focus();
 
     const typingNode = renderTyping();
+    const payload = { question: text, sessionId };
+    const recentHistory = collectHistory(4);
+    if (recentHistory.length > 0) {
+      payload.history = recentHistory;
+    }
     try {
       const response = await fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: text }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -314,8 +413,51 @@
       appendBotMessage(answer);
     } catch (error) {
       removeTyping(typingNode);
-      appendBotMessage("Упс! Не удалось связаться с сервером.");
+      appendBotMessage(CONNECTION_ERROR_MESSAGE);
       console.error("U4S widget fetch error", error);
+    }
+  });
+
+  elements.reset.addEventListener("click", async () => {
+    if (elements.reset.disabled) return;
+    elements.reset.disabled = true;
+
+    const previousMessages = loadHistory();
+    const lastKnownHistory = Array.isArray(previousMessages)
+      ? previousMessages.slice(-4).map((message) => ({
+          role: message?.role === "me" ? "user" : "assistant",
+          text: typeof message?.text === "string" ? message.text : "",
+        }))
+      : [];
+
+    clearChatHistory();
+    const typingNode = renderTyping();
+
+    const resetPayload = { reset: true, action: "reset", sessionId };
+    if (lastKnownHistory.length > 0) {
+      resetPayload.history = lastKnownHistory;
+    }
+
+    try {
+      const response = await fetch(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(resetPayload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      removeTyping(typingNode);
+      appendBotMessage(INITIAL_GREETING);
+    } catch (error) {
+      removeTyping(typingNode);
+      restoreHistory(previousMessages);
+      appendBotMessage(RESET_ERROR_MESSAGE);
+      console.error("U4S widget reset error", error);
+    } finally {
+      elements.reset.disabled = false;
     }
   });
 
