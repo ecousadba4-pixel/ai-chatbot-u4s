@@ -6,7 +6,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .redis_gateway import parse_redis_args
+if __package__:
+    from .redis_gateway import parse_redis_args
+else:
+    from redis_gateway import parse_redis_args
 
 
 def _strip(value: str | None) -> str:
