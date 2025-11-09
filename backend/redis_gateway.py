@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 REDIS_HISTORY_KEY = "chat:history:{session_id}"
+REDIS_CONTEXT_KEY = "chat:context:{session_id}"
 REDIS_HISTORY_TTL_SECONDS = 30 * 60
 REDIS_MAX_MESSAGES = 50
 
@@ -177,4 +178,63 @@ class RedisHistoryGateway:
             self._client.delete(key)
         except Exception:  # pragma: no cover - логируем и идем дальше
             logger.exception("Redis delete_history error")
+
+    # --- сохранение контекстного состояния диалога ---
+
+    def _context_key(self, session_id: str) -> str | None:
+        session = (session_id or "").strip()
+        if not session:
+            return None
+        return REDIS_CONTEXT_KEY.format(session_id=session)
+
+    def read_context(self, session_id: str) -> dict[str, Any]:
+        if not self._client:
+            return {}
+        key = self._context_key(session_id)
+        if not key:
+            return {}
+        try:
+            raw_value = self._client.get(key)
+        except Exception:  # pragma: no cover - логируем и идем дальше
+            logger.exception("Redis read_context error")
+            return {}
+        if not raw_value:
+            return {}
+        try:
+            payload = json.loads(raw_value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(payload, dict):
+            return payload
+        return {}
+
+    def write_context(
+        self,
+        session_id: str,
+        context: dict[str, Any],
+        ttl: int | None = None,
+    ) -> None:
+        if not self._client:
+            return
+        key = self._context_key(session_id)
+        if not key:
+            return
+        ttl_seconds = int(ttl) if ttl else self._ttl_seconds
+        ttl_seconds = max(ttl_seconds, 1)
+        try:
+            payload = json.dumps(context or {}, ensure_ascii=False)
+            self._client.setex(key, ttl_seconds, payload)
+        except Exception:  # pragma: no cover - логируем и идем дальше
+            logger.exception("Redis write_context error")
+
+    def delete_context(self, session_id: str) -> None:
+        if not self._client:
+            return
+        key = self._context_key(session_id)
+        if not key:
+            return
+        try:
+            self._client.delete(key)
+        except Exception:  # pragma: no cover - логируем и идем дальше
+            logger.exception("Redis delete_context error")
 

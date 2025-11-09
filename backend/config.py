@@ -77,6 +77,9 @@ class AppConfig:
     context_per_file_limit: int = 12
     cache_ttl: float = 180.0
     cache_max_files: int = 32
+    shelter_cloud_base_url: str = ""
+    shelter_cloud_client_id: str = ""
+    shelter_cloud_client_secret: str = ""
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -89,6 +92,15 @@ class AppConfig:
             redis_args=parse_redis_args(os.environ.get("REDIS_ARGS")),
             cache_max_files=_parse_positive_int(
                 os.environ.get("CACHE_MAX_FILES"), default=32
+            ),
+            shelter_cloud_base_url=_strip(
+                os.environ.get("SHELTER_CLOUD_BASE_URL")
+            ),
+            shelter_cloud_client_id=_strip(
+                os.environ.get("SHELTER_CLOUD_CLIENT_ID")
+            ),
+            shelter_cloud_client_secret=_strip(
+                os.environ.get("SHELTER_CLOUD_CLIENT_SECRET")
             ),
         )
 

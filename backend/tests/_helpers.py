@@ -44,6 +44,7 @@ class DummyRedisGateway:
     def __init__(self, *, max_messages: int = REDIS_MAX_MESSAGES):
         self.max_messages = max_messages
         self.storage: dict[str, list[dict]] = {}
+        self.context_storage: dict[str, dict] = {}
 
     def read_history(self, session_id: str) -> list[dict]:
         return [dict(item) for item in self.storage.get(session_id, [])]
@@ -54,6 +55,15 @@ class DummyRedisGateway:
 
     def delete_history(self, session_id: str) -> None:
         self.storage.pop(session_id, None)
+
+    def read_context(self, session_id: str) -> dict:
+        return dict(self.context_storage.get(session_id, {}))
+
+    def write_context(self, session_id: str, context: dict, ttl: int | None = None) -> None:
+        self.context_storage[session_id] = dict(context or {})
+
+    def delete_context(self, session_id: str) -> None:
+        self.context_storage.pop(session_id, None)
 
 
 class DummyRequest:
@@ -72,8 +82,9 @@ def load_app_module(monkeypatch):
     for key in ("YANDEX_API_KEY", "YANDEX_FOLDER_ID", "VECTOR_STORE_ID"):
         os.environ[key] = f"test-{key.lower()}"
 
-    if module_name in sys.modules:
-        del sys.modules[module_name]
+    for dependency in [module_name, "backend.config", "backend.rag"]:
+        if dependency in sys.modules:
+            del sys.modules[dependency]
 
     app_mod = importlib.import_module(module_name)
     importlib.reload(app_mod)
