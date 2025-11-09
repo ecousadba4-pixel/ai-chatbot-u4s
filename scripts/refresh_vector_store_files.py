@@ -65,49 +65,93 @@ def _http_post_json(
     return status_code, text, content_type, data
 
 
-def update_chunking_strategy(*, api_key: str, folder_id: str, search_index_id: str,
-                             max_chunk_tokens: int, overlap_tokens: int) -> None:
+def update_chunking_strategy(
+    *,
+    api_key: str,
+    folder_id: str,
+    search_index_id: str,
+    max_chunk_tokens: int,
+    overlap_tokens: int,
+) -> None:
     """Вызывает SearchIndex.Update для настройки чанков."""
 
-    # Согласно рекомендациям API SearchIndex.Update используем plural "searchIndexes"
-    # и обязательно передаём updateMask, чтобы явно указать изменяемые поля.
-    url = f"{BASE_URL}/searchIndexes:update"
     headers = {
         "Authorization": f"Api-Key {api_key}",
         "x-folder-id": folder_id,
         "Content-Type": "application/json",
     }
-    payload = {
-        "searchIndexId": search_index_id,
-        "updateMask": "chunking_strategy.static_strategy",
-        "chunkingStrategy": {
-            "staticStrategy": {
-                "maxChunkSizeTokens": max_chunk_tokens,
-                "chunkOverlapTokens": overlap_tokens,
-            }
-        },
-    }
+    attempts = [
+        (
+            "searchIndexes:update",
+            f"{BASE_URL}/searchIndexes:update",
+            {
+                "searchIndexId": search_index_id,
+                "updateMask": "chunking_strategy.static_strategy",
+                "chunkingStrategy": {
+                    "staticStrategy": {
+                        "maxChunkSizeTokens": max_chunk_tokens,
+                        "chunkOverlapTokens": overlap_tokens,
+                    }
+                },
+            },
+        ),
+        (
+            "searchIndexes/{id}:update",
+            f"{BASE_URL}/searchIndexes/{search_index_id}:update",
+            {
+                "updateMask": "chunking_strategy.static_strategy",
+                "searchIndex": {
+                    "chunkingStrategy": {
+                        "staticStrategy": {
+                            "maxChunkSizeTokens": max_chunk_tokens,
+                            "chunkOverlapTokens": overlap_tokens,
+                        }
+                    }
+                },
+            },
+        ),
+    ]
 
     print("\n🧱 Обновляю параметры разбивки на чанки…")
-    status_code, body, content_type, data = _http_post_json(
-        url,
-        headers,
-        payload,
-        timeout=60,
-    )
+    last_error = None
 
-    if status_code >= 300:
-        raise RuntimeError(
-            f"SearchIndex.Update HTTP {status_code}: {body[:500]}"
+    for idx, (label, url, payload) in enumerate(attempts):
+        status_code, body, content_type, data = _http_post_json(
+            url,
+            headers,
+            payload,
+            timeout=60,
         )
 
-    if not isinstance(data, dict) and content_type.startswith("application/json"):
-        # requests fallback может вернуть что-то иное, приводим к dict
-        data = {}
-    status = data.get("status") if isinstance(data, dict) else None
-    print(
-        "   ✅ Параметры чанков обновлены"
-        + (f" (status={status})" if status else "")
+        if status_code < 300:
+            if not isinstance(data, dict) and content_type.startswith("application/json"):
+                data = {}
+            status = None
+            if isinstance(data, dict):
+                status = data.get("status")
+                if not status and isinstance(data.get("searchIndex"), dict):
+                    status = data["searchIndex"].get("status")
+            print(
+                "   ✅ Параметры чанков обновлены"
+                + (f" (status={status})" if status else "")
+            )
+            return
+
+        last_error = (label, status_code, body)
+        if status_code == 404 and idx + 1 < len(attempts):
+            print(
+                f"   ⚠️ {label} вернул 404, пробую альтернативный endpoint…"
+            )
+            continue
+
+        break
+
+    if last_error is None:
+        raise RuntimeError("SearchIndex.Update не удалось по неизвестной причине")
+
+    label, status_code, body = last_error
+    raise RuntimeError(
+        f"SearchIndex.Update ({label}) HTTP {status_code}: {body[:500]}"
     )
 
 def mask(s: str, keep=4):
