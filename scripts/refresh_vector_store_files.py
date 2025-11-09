@@ -1,12 +1,68 @@
 # scripts/refresh_vector_store_files.py
 import os
 import time
+import json
 import argparse
 from pathlib import Path
+from typing import Any, Dict, Tuple
 from openai import OpenAI
-import requests
+from urllib import request as urllib_request
+from urllib import error as urllib_error
+
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover - fallback для сред без requests
+    requests = None  # type: ignore[assignment]
 
 BASE_URL = "https://rest-assistant.api.cloud.yandex.net/v1"
+
+
+def _http_post_json(
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    *,
+    timeout: int,
+) -> Tuple[int, str, str, Dict[str, Any]]:
+    """Делает POST с JSON, используя requests или стандартную библиотеку."""
+
+    if requests is not None:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        content_type = resp.headers.get("Content-Type", "")
+        text = resp.text
+        data: Dict[str, Any] = {}
+        if content_type.startswith("application/json"):
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+        return resp.status_code, text, content_type, data
+
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        data=body,
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            status_code = resp.status
+            content_type = resp.headers.get("Content-Type", "")
+            text = resp.read().decode("utf-8", "replace")
+    except urllib_error.HTTPError as err:
+        status_code = err.code
+        content_type = err.headers.get("Content-Type", "") if err.headers else ""
+        text = err.read().decode("utf-8", "replace")
+
+    data = {}
+    if content_type.startswith("application/json"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = {}
+
+    return status_code, text, content_type, data
 
 
 def update_chunking_strategy(*, api_key: str, folder_id: str, search_index_id: str,
@@ -30,19 +86,21 @@ def update_chunking_strategy(*, api_key: str, folder_id: str, search_index_id: s
     }
 
     print("\n🧱 Обновляю параметры разбивки на чанки…")
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    if resp.status_code >= 300:
-        body = resp.text
-        try:
-            data = resp.json()
-            body = str(data)
-        except Exception:
-            pass
+    status_code, body, content_type, data = _http_post_json(
+        url,
+        headers,
+        payload,
+        timeout=60,
+    )
+
+    if status_code >= 300:
         raise RuntimeError(
-            f"SearchIndex.Update HTTP {resp.status_code}: {body[:500]}"
+            f"SearchIndex.Update HTTP {status_code}: {body[:500]}"
         )
 
-    data = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+    if not isinstance(data, dict) and content_type.startswith("application/json"):
+        # requests fallback может вернуть что-то иное, приводим к dict
+        data = {}
     status = data.get("status") if isinstance(data, dict) else None
     print(
         "   ✅ Параметры чанков обновлены"
