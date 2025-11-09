@@ -47,6 +47,11 @@ class ShelterCloudService:
         self._config = config
         self._session = session or requests.Session()
 
+    def is_configured(self) -> bool:
+        """Возвращает, настроен ли сервис."""
+
+        return self._config.is_configured()
+
     # ---- общие HTTP-хелперы ---------------------------------------------
 
     def _request(

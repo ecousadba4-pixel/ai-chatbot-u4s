@@ -221,6 +221,14 @@ class BookingDialogueManager:
 
     # ------------------------------------------------------------------ финализация
     def _finalize(self, context: DialogueContext) -> str:
+        is_configured = getattr(self.service, "is_configured", None)
+        if callable(is_configured) and not bool(is_configured()):
+            context.branch = BRANCH_ONLINE_BOOKING_REDIRECT
+            return (
+                "Подбор доступных номеров сейчас недоступен. "
+                "Предлагаю перейти в модуль онлайн-бронирования на сайте."
+            )
+
         try:
             offers = self.service.fetch_availability(
                 check_in=context.booking.check_in or "",
