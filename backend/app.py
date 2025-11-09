@@ -13,16 +13,11 @@ if __package__:
         ChatHistoryItem,
         ChatModelMessage,
         build_conversation_messages,
-        coerce_timestamp,
-        extract_last_user_content,
         merge_histories,
-        messages_to_responses_input,
         normalize_messages_for_model,
         normalize_question,
-        replace_system_prompt,
         sanitize_history_messages,
         to_bool,
-        trim_messages_for_model,
     )
     from .rag import (
         CLIENT as RAG_CLIENT,
@@ -43,16 +38,11 @@ else:
         ChatHistoryItem,
         ChatModelMessage,
         build_conversation_messages,
-        coerce_timestamp,
-        extract_last_user_content,
         merge_histories,
-        messages_to_responses_input,
         normalize_messages_for_model,
         normalize_question,
-        replace_system_prompt,
         sanitize_history_messages,
         to_bool,
-        trim_messages_for_model,
     )
     from rag import (
         CLIENT as RAG_CLIENT,
@@ -243,87 +233,3 @@ async def chat_reset(request: Request) -> dict[str, bool]:
 
     return {"ok": True}
 
-
-# Backwards-compatible helper aliases
-def _sanitize_history_messages(raw_history: Any) -> list[ChatHistoryItem]:
-    return sanitize_history_messages(raw_history)
-
-
-def _merge_histories(
-    *histories: Sequence[ChatHistoryItem], limit: int | None = None
-) -> list[ChatHistoryItem]:
-    return merge_histories(*histories, limit=limit)
-
-
-def _build_conversation_messages(
-    history: Sequence[ChatHistoryItem], *, question: str
-) -> list[ChatModelMessage]:
-    return build_conversation_messages(
-        history,
-        question=question,
-        system_prompt=SYSTEM_PROMPT_RAG,
-    )
-
-
-def _normalize_messages_for_model(
-    messages: Sequence[ChatModelMessage],
-) -> tuple[list[ChatModelMessage], str]:
-    return normalize_messages_for_model(messages)
-
-
-def _replace_system_prompt(
-    messages: Sequence[ChatModelMessage], new_prompt: str
-) -> list[ChatModelMessage]:
-    return replace_system_prompt(messages, new_prompt)
-
-
-def _messages_to_responses_input(
-    messages: Sequence[ChatModelMessage],
-) -> list[dict[str, Any]]:
-    return messages_to_responses_input(messages)
-
-
-def _trim_messages_for_model(
-    messages: Sequence[ChatModelMessage], *, max_tokens: int, min_assistant_messages: int = 2
-) -> list[ChatModelMessage]:
-    return trim_messages_for_model(
-        messages,
-        max_tokens=max_tokens,
-        min_assistant_messages=min_assistant_messages,
-    )
-
-
-def _extract_last_user_content(messages: Sequence[ChatModelMessage]) -> str:
-    return extract_last_user_content(messages)
-
-
-def _coerce_timestamp(value: Any, fallback: float) -> float:
-    return coerce_timestamp(value, fallback)
-
-
-def _to_bool(value: Any) -> bool:
-    return to_bool(value)
-
-
-# Backwards-compatible exports for tests and integrations
-build_context_from_vector_store = build_context_from_vector_store
-ask_with_vector_store_context = ask_with_vector_store_context
-rag_via_responses = rag_via_responses
-normalize_question = normalize_question
-SYSTEM_PROMPT_RAG = SYSTEM_PROMPT_RAG
-CLIENT = CLIENT
-VECTOR_STORE = VECTOR_STORE
-AppConfig = AppConfig
-CONFIG = CONFIG
-ChatHistoryItem = ChatHistoryItem
-ChatModelMessage = ChatModelMessage
-sanitize_history_messages = sanitize_history_messages
-merge_histories = merge_histories
-build_conversation_messages = build_conversation_messages
-normalize_messages_for_model = normalize_messages_for_model
-replace_system_prompt = replace_system_prompt
-messages_to_responses_input = messages_to_responses_input
-trim_messages_for_model = trim_messages_for_model
-extract_last_user_content = extract_last_user_content
-coerce_timestamp = coerce_timestamp
-to_bool = to_bool
