@@ -148,14 +148,20 @@ class ShelterCloudService:
     @staticmethod
     def _extract_offers(payload: dict[str, Any]) -> list[dict[str, Any]]:
         offers: list[dict[str, Any]] = []
+
+        chunked_data = payload.get("data")
+        if isinstance(chunked_data, list):
+            offers.extend(ShelterCloudService._extract_from_chunked_payload(chunked_data))
+            if offers:
+                return offers
+
         rooms: list[Any] = []
         raw_rooms = payload.get("rooms") or payload.get("items")
         if isinstance(raw_rooms, list):
             rooms = raw_rooms
         else:
-            data_block = payload.get("data")
-            if isinstance(data_block, list):
-                for chunk in data_block:
+            if isinstance(chunked_data, list):
+                for chunk in chunked_data:
                     if isinstance(chunk, list):
                         rooms.extend(item for item in chunk if isinstance(item, dict))
                     elif isinstance(chunk, dict):
@@ -172,6 +178,7 @@ class ShelterCloudService:
                 or room.get("title")
                 or "Номер"
             ).strip()
+            room_area = room.get("roomArea") or room.get("area")
             rates = room.get("rates") or room.get("offers") or []
             if not isinstance(rates, list):
                 rates = []
@@ -203,9 +210,96 @@ class ShelterCloudService:
                         "price": price_value,
                         "currency": currency,
                         "breakfast_included": breakfast,
+                        "room_area": room_area,
                     }
                 )
         return offers
+
+    @staticmethod
+    def _extract_from_chunked_payload(chunks: list[Any]) -> list[dict[str, Any]]:
+        offers: list[dict[str, Any]] = []
+        categories: dict[int, dict[str, Any]] = {}
+        variants: list[dict[str, Any]] = []
+
+        for chunk in chunks:
+            if isinstance(chunk, list):
+                for item in chunk:
+                    if not isinstance(item, dict):
+                        continue
+                    if "roomCategoryID" in item and "price" in item:
+                        variants.append(item)
+                    elif "roomCategoryID" in item and "priceRub" in item:
+                        variants.append(item)
+                    elif "id" in item and (
+                        "availableRooms" in item or "availableBeds" in item
+                    ):
+                        category_key = ShelterCloudService._normalize_category_id(item.get("id"))
+                        if category_key is not None:
+                            categories[category_key] = item
+            elif isinstance(chunk, dict):
+                if "roomCategoryID" in chunk and (
+                    "price" in chunk or "priceRub" in chunk
+                ):
+                    variants.append(chunk)
+
+        for variant in variants:
+            category_key = ShelterCloudService._normalize_category_id(
+                variant.get("roomCategoryID")
+            )
+            category: dict[str, Any] | None = (
+                categories.get(category_key) if category_key is not None else None
+            )
+            room_name = str(
+                (category or {}).get("name")
+                or variant.get("roomName")
+                or variant.get("name")
+                or "Номер"
+            ).strip()
+            room_area = (category or {}).get("roomArea")
+
+            price_value: float | None = None
+            for key in ("price", "priceRub", "priceWithoutDiscount"):
+                amount = variant.get(key)
+                if amount is None:
+                    continue
+                try:
+                    price_value = float(amount)
+                    break
+                except (TypeError, ValueError):
+                    continue
+            if price_value is None:
+                continue
+
+            currency = str(variant.get("currency") or "RUB").upper()
+
+            offers.append(
+                {
+                    "name": room_name,
+                    "price": price_value,
+                    "currency": currency,
+                    "breakfast_included": True,
+                    "room_area": room_area,
+                }
+            )
+
+        return offers
+
+    @staticmethod
+    def _normalize_category_id(value: Any) -> int | str | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return text
 __all__ = [
     "ShelterCloudService",
     "ShelterCloudConfig",

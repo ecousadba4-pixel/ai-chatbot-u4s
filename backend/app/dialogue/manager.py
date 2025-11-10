@@ -345,7 +345,20 @@ class BookingDialogueManager:
     @staticmethod
     def _offer_name(offer: dict[str, Any]) -> str:
         name = offer.get("name")
-        return str(name) if name else "номер"
+        base_name = str(name) if name else "номер"
+        area = offer.get("room_area")
+        if area is None:
+            return base_name
+
+        if isinstance(area, (int, float)):
+            area_text = f"{area:g} м²"
+        else:
+            area_text = str(area).strip()
+
+        if not area_text:
+            return base_name
+
+        return f"{base_name} ({area_text})"
 
     @staticmethod
     def _wants_more_offers(lower_question: str) -> bool:
