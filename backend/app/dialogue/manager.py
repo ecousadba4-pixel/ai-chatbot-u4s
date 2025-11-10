@@ -74,6 +74,16 @@ class BookingDialogueManager:
         context = self._load_context(session_id)
         lower_question = normalized.lower()
 
+        if (
+            context.intent == INTENT_BOOKING_INQUIRY
+            and context.state == STATE_COMPLETE
+            and self._wants_booking_link(lower_question)
+            and context.cached_offers
+        ):
+            answer = self._booking_link_message()
+            self._save_context(session_id, context)
+            return DialogueResult(True, answer, context.intent, context.branch)
+
         if self._should_start_new_dialogue(context, lower_question):
             context = self._start_dialogue()
             self._save_context(session_id, context)
@@ -253,20 +263,26 @@ class BookingDialogueManager:
 
     def _handle_complete(self, context: DialogueContext, question: str) -> str | None:
         lower_question = question.lower()
+        if self._wants_booking_link(lower_question) and context.cached_offers:
+            return self._booking_link_message()
+
         if self._wants_more_offers(lower_question):
             offers = context.cached_offers or []
             next_index = context.last_offer_index + 1
             if next_index < len(offers):
-                context.last_offer_index = next_index
-                offer = offers[next_index]
-                breakfast_note = (
-                    "завтрак включён" if offer.get("breakfast_included") else "завтрак не включён"
-                )
-                price_text = self._format_price(offer.get("price"), offer.get("currency"))
-                return (
-                    f"Нашла ещё вариант: {self._offer_name(offer)} — {price_text}, {breakfast_note}. "
-                    "Сообщите, если хотите продолжить бронирование или перейти в онлайн-модуль."
-                )
+                chunk = self._format_offers_chunk(offers, next_index)
+                if not chunk:
+                    return None
+                context.last_offer_index = next_index + len(chunk) - 1
+                message_lines = [
+                    f"Показываю ещё варианты (всего {len(offers)}):",
+                    *self._render_offers_lines(offers, next_index, next_index + len(chunk)),
+                ]
+                if context.last_offer_index + 1 >= len(offers):
+                    message_lines.append(
+                        "Это все доступные предложения на выбранные даты."
+                    )
+                return "\n".join(message_lines)
             if offers:
                 return (
                     "Пока это все доступные предложения на выбранные даты. "
@@ -324,15 +340,17 @@ class BookingDialogueManager:
             )
 
         context.cached_offers = offers
-        context.last_offer_index = 0
-        offer = offers[0]
         context.branch = BRANCH_BOOKING_PRICE_CHAT
-        breakfast_note = "завтрак включён" if offer.get("breakfast_included") else "завтрак не включён"
-        price_text = self._format_price(offer.get("price"), offer.get("currency"))
-        return (
-            f"Нашла вариант: {self._offer_name(offer)} — {price_text}, {breakfast_note}. "
-            "Сообщите, если хотите продолжить бронирование или перейти в онлайн-модуль."
-        )
+        chunk = self._format_offers_chunk(offers, 0)
+        context.last_offer_index = len(chunk) - 1
+        count_line = self._format_offers_count_line(len(offers))
+        lines = [count_line]
+        lines.extend(self._render_offers_lines(offers, 0, len(chunk)))
+        if len(offers) > len(chunk):
+            lines.append("Если захотите увидеть больше вариантов — просто сообщите.")
+        else:
+            lines.append("Если какой-то вариант подходит, дайте знать.")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ утилиты
     @staticmethod
@@ -340,6 +358,13 @@ class BookingDialogueManager:
         return (
             "Вы можете оформить бронирование самостоятельно в модуле онлайн-бронирования на сайте. "
             "Если понадобится помощь — я рядом!"
+        )
+
+    @staticmethod
+    def _booking_link_message() -> str:
+        return (
+            "Отлично! Для продолжения бронирования перейдите по ссылке: "
+            "<https://usadba4.ru/bronirovanie/>."
         )
 
     @staticmethod
@@ -359,6 +384,65 @@ class BookingDialogueManager:
             return base_name
 
         return f"{base_name} ({area_text})"
+
+    @staticmethod
+    def _format_offers_count_line(count: int) -> str:
+        if count <= 0:
+            return "Нашла 0 вариантов."
+        remainder_10 = count % 10
+        remainder_100 = count % 100
+        if remainder_10 == 1 and remainder_100 != 11:
+            suffix = "вариант"
+        elif remainder_10 in (2, 3, 4) and remainder_100 not in (12, 13, 14):
+            suffix = "варианта"
+        else:
+            suffix = "вариантов"
+        return f"Нашла {count} {suffix}."
+
+    @staticmethod
+    def _format_offer_area(area: Any) -> str:
+        if area is None:
+            return "площадь не указана"
+        if isinstance(area, (int, float)):
+            return f"площадь {area:g} м²"
+        text = str(area).strip()
+        return f"площадь {text}" if text else "площадь не указана"
+
+    def _format_offer_entry(self, offer: dict[str, Any]) -> str:
+        name = str(offer.get("name") or "Номер").strip() or "Номер"
+        area_text = self._format_offer_area(offer.get("room_area"))
+        price_text = self._format_price(offer.get("price"), offer.get("currency"))
+        breakfast_note = (
+            "завтрак включён" if offer.get("breakfast_included") else "завтрак не включён"
+        )
+        return f"{name} — {area_text}, {price_text} ({breakfast_note})"
+
+    def _format_offers_chunk(self, offers: list[dict[str, Any]], start: int) -> list[dict[str, Any]]:
+        if start >= len(offers):
+            return []
+        end = min(start + 3, len(offers))
+        return offers[start:end]
+
+    def _render_offers_lines(self, offers: list[dict[str, Any]], start: int, end: int) -> list[str]:
+        lines: list[str] = []
+        for index in range(start, min(end, len(offers))):
+            entry = self._format_offer_entry(offers[index])
+            lines.append(f"{index + 1}. {entry}")
+        return lines
+
+    @staticmethod
+    def _wants_booking_link(lower_question: str) -> bool:
+        if not lower_question:
+            return False
+        tokens = (
+            "заброни",  # забронировать, забронируй
+            "оформи",  # оформить, оформи
+            "бронируй",
+            "возьми",  # возьму этот вариант
+            "подходит",
+            "беру",
+        )
+        return any(token in lower_question for token in tokens)
 
     @staticmethod
     def _wants_more_offers(lower_question: str) -> bool:

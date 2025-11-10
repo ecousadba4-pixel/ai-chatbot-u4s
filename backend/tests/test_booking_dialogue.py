@@ -78,10 +78,12 @@ def test_booking_flow_success(app_module, monkeypatch):
         app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "5 лет"}))
     )
 
-    assert "нашла вариант" in response["answer"].lower()
-    assert "12 345" in response["answer"]
-    assert "завтрак включён" in response["answer"].lower()
-    assert "Стандарт" in response["answer"]
+    answer = response["answer"]
+    assert "Нашла 1 вариант" in answer
+    assert "1. Стандарт" in answer
+    assert "12 345" in answer
+    assert "площадь не указана" in answer
+    assert "(завтрак включён)" in answer
     assert response["branch"] == "booking_price_chat"
 
     assert service.calls
@@ -275,6 +277,21 @@ def test_booking_more_offer_requests(app_module, monkeypatch):
                 "price": 15000,
                 "currency": "RUB",
                 "breakfast_included": False,
+                "room_area": 45,
+            },
+            {
+                "name": "Семейный",
+                "price": 18000,
+                "currency": "RUB",
+                "breakfast_included": True,
+                "room_area": 55,
+            },
+            {
+                "name": "Пентхаус",
+                "price": 35000,
+                "currency": "RUB",
+                "breakfast_included": True,
+                "room_area": 120,
             },
         ],
     )
@@ -299,7 +316,10 @@ def test_booking_more_offer_requests(app_module, monkeypatch):
         app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "0"}))
     )
 
-    assert "Стандарт" in final_response["answer"]
+    assert "Нашла 4 варианта" in final_response["answer"]
+    assert "1. Стандарт" in final_response["answer"]
+    assert "2. Люкс" in final_response["answer"]
+    assert "3. Семейный" in final_response["answer"]
     assert final_response["branch"] == "booking_price_chat"
 
     more_response = asyncio.run(
@@ -308,8 +328,9 @@ def test_booking_more_offer_requests(app_module, monkeypatch):
         )
     )
 
-    assert "ещё вариант" in more_response["answer"].lower()
-    assert "Люкс" in more_response["answer"]
+    assert "Показываю ещё варианты" in more_response["answer"]
+    assert "4. Пентхаус" in more_response["answer"]
+    assert "(завтрак включён)" in more_response["answer"]
     assert more_response["branch"] == "booking_price_chat"
 
     no_more_response = asyncio.run(
@@ -322,4 +343,51 @@ def test_booking_more_offer_requests(app_module, monkeypatch):
     assert no_more_response["branch"] == "booking_price_chat"
 
     context = redis_gateway.context_storage[session_id]
-    assert context["last_offer_index"] == 1
+    assert context["last_offer_index"] == 3
+
+
+def test_booking_shares_online_form_link(app_module, monkeypatch):
+    _prepare_booking(
+        app_module,
+        monkeypatch,
+        offers=[
+            {
+                "name": "Стандарт",
+                "price": 12345,
+                "currency": "RUB",
+                "breakfast_included": True,
+            }
+        ],
+    )
+
+    session_id = "booking-link"
+
+    asyncio.run(
+        app_module.chat_post(
+            DummyRequest({"sessionId": session_id, "question": "Нужно забронировать номер"})
+        )
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "01.02.2025"}))
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "03.02.2025"}))
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "2"}))
+    )
+    asyncio.run(
+        app_module.chat_post(DummyRequest({"sessionId": session_id, "question": "0"}))
+    )
+
+    response = asyncio.run(
+        app_module.chat_post(
+            DummyRequest({"sessionId": session_id, "question": "Хочу забронировать этот номер"})
+        )
+    )
+
+    assert response["answer"].startswith(
+        "Отлично! Для продолжения бронирования перейдите по ссылке:"
+    )
+    assert "<https://usadba4.ru/bronirovanie/>" in response["answer"]
+    assert response["branch"] == "booking_price_chat"
