@@ -112,14 +112,19 @@ class ShelterCloudService:
         children: int,
         children_ages: Iterable[int],
     ) -> list[dict[str, Any]]:
+        room_payload: dict[str, Any] = {
+            "adults": adults,
+        }
+        if children:
+            normalized_ages = [str(max(0, int(age))) for age in children_ages][:children]
+            if normalized_ages:
+                room_payload["kidsAges"] = ",".join(normalized_ages)
+
         payload = {
             "dateFrom": check_in,
             "dateTo": check_out,
-            "adults": adults,
-            "children": children,
+            "rooms": [room_payload],
         }
-        if children:
-            payload["childrenAges"] = [max(0, int(age)) for age in children_ages]
 
         data = self._request(AVAILABILITY_URL, payload=payload)
         offers = self._extract_offers(data)
