@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import time
 from typing import Any, Sequence
 
 import requests
+from loguru import logger
 
 if __package__:
     from .config import CONFIG
@@ -26,9 +26,6 @@ else:
         replace_system_prompt,
         trim_messages_for_model,
     )
-
-logger = logging.getLogger(__name__)
-
 
 FILES_API = "https://rest-assistant.api.cloud.yandex.net/v1"
 RESPONSES_API = f"{FILES_API}/responses"

@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-import logging
 import shlex
 from typing import Any, Sequence
 from urllib.parse import parse_qsl
+
+from loguru import logger
 
 try:  # pragma: no cover - опциональная зависимость в тестовой среде
     import redis
 except ModuleNotFoundError:  # pragma: no cover - graceful degradation без redis
     redis = None
-
-logger = logging.getLogger(__name__)
 
 
 REDIS_HISTORY_KEY = "chat:history:{session_id}"

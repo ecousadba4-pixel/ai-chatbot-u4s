@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from typing import Any, Sequence
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 
 from backend.config import CONFIG, AppConfig
 from backend.conversation import (
@@ -41,9 +41,6 @@ from .dialogue.state import (
     INTENT_BOOKING_INQUIRY,
 )
 from .services import ShelterCloudConfig, ShelterCloudService
-
-
-logger = logging.getLogger(__name__)
 
 
 DEFAULT_ERROR_ANSWER = "Извините, сейчас не могу ответить. Попробуйте позже."
@@ -129,11 +126,11 @@ def _produce_answer(messages: Sequence[ChatModelMessage], *, log_prefix: str) ->
     try:
         return rag_via_responses(messages)
     except Exception:
-        logger.exception("%s RAG error", log_prefix)
+        logger.exception("{prefix} RAG error", prefix=log_prefix)
         try:
             return ask_with_vector_store_context(messages)
         except Exception:
-            logger.exception("%s fallback error", log_prefix)
+            logger.exception("{prefix} fallback error", prefix=log_prefix)
             raise
 
 

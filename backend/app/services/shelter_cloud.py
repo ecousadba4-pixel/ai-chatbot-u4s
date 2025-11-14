@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 import requests
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 AVAILABILITY_URL = "https://pms.frontdesk24.ru/api/online/getVariants"
 HOTEL_PARAMS_URL = "https://pms.frontdesk24.ru/api/online/getHotelParams"
@@ -82,10 +81,10 @@ class ShelterCloudService:
 
         if response.status_code >= 400:
             logger.error(
-                "Shelter Cloud HTTP %s at %s: %s",
-                response.status_code,
-                url,
-                response.text,
+                "Shelter Cloud HTTP {status} at {url}: {body}",
+                status=response.status_code,
+                url=url,
+                body=response.text,
             )
             raise ShelterCloudAvailabilityError(
                 f"HTTP_{response.status_code}: {response.text.strip()}"
