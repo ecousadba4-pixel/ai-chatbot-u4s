@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from backend.config import CONFIG, AppConfig
+from backend.config import CONFIG
 from backend.conversation import (
     ChatHistoryItem,
     ChatModelMessage,
@@ -22,7 +22,6 @@ from backend.conversation import (
 from backend.rag import (
     CLIENT as RAG_CLIENT,
     SYSTEM_PROMPT_RAG,
-    VECTOR_STORE as RAG_VECTOR_STORE,
     ask_with_vector_store_context as rag_ask_with_vector_store_context,
     build_context_from_vector_store as rag_build_context_from_vector_store,
     rag_via_responses as rag_rag_via_responses,
@@ -72,7 +71,6 @@ app.add_middleware(
 
 
 CLIENT = RAG_CLIENT
-VECTOR_STORE = RAG_VECTOR_STORE
 
 
 def rag_via_responses(messages: Sequence[ChatModelMessage]) -> str:
@@ -80,13 +78,11 @@ def rag_via_responses(messages: Sequence[ChatModelMessage]) -> str:
 
 
 def ask_with_vector_store_context(messages: Sequence[ChatModelMessage]) -> str:
-    return rag_ask_with_vector_store_context(
-        messages, client=CLIENT, vector_store=VECTOR_STORE
-    )
+    return rag_ask_with_vector_store_context(messages, client=CLIENT)
 
 
 def build_context_from_vector_store(question: str) -> str:
-    return rag_build_context_from_vector_store(question, vector_store=VECTOR_STORE)
+    return rag_build_context_from_vector_store(question)
 
 
 def _booking_handler() -> BookingIntentHandler:
@@ -164,22 +160,12 @@ def health() -> dict[str, bool]:
 def debug_info() -> dict[str, Any]:
     info: dict[str, Any] = {
         "env": {
-            "HAS_API_KEY": CONFIG.has_api_credentials,
-            "YANDEX_FOLDER_ID": CONFIG.yandex_folder_id,
-            "VECTOR_STORE_ID": CONFIG.vector_store_id,
+            "HAS_API_TOKEN": CONFIG.has_api_credentials,
+            "AMVERA_MODEL": CONFIG.amvera_model,
+            "AMVERA_API_URL": CONFIG.amvera_api_url,
             "ALLOWED_ORIGINS": CONFIG.allowed_origins,
-            "CAN_USE_VECTOR_STORE": CONFIG.can_use_vector_store,
         },
-        "vs_files_count": 0,
-        "vs_sample": [],
-        "error": None,
     }
-    try:
-        files = VECTOR_STORE.list_files()
-        info["vs_files_count"] = len(files)
-        info["vs_sample"] = files[:3]
-    except Exception as error:
-        info["error"] = str(error)
     return info
 
 

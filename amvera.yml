@@ -13,11 +13,11 @@ services:
     ports:
       - 8000
     env:
-      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID}
-      VECTOR_STORE_ID: ${VECTOR_STORE_ID}
+      AMVERA_API_URL: ${AMVERA_API_URL}
+      AMVERA_MODEL: ${AMVERA_MODEL}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
     secrets:
-      - YANDEX_API_KEY
+      - AMVERA_API_TOKEN
     healthcheck:
       path: /health
       interval: 15s
@@ -34,5 +34,5 @@ services:
             protocol: http
 
 secrets:
-  - name: YANDEX_API_KEY
+  - name: AMVERA_API_TOKEN
 

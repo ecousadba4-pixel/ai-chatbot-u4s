@@ -59,9 +59,9 @@ def parse_allowed_origins(raw: str | None) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class AppConfig:
-    yandex_api_key: str
-    yandex_folder_id: str
-    vector_store_id: str
+    amvera_api_token: str
+    amvera_api_url: str
+    amvera_model: str
     allowed_origins: tuple[str, ...]
     http_timeout: float = 30.0
     completion_timeout: float = 60.0
@@ -76,9 +76,11 @@ class AppConfig:
     @classmethod
     def from_env(cls) -> "AppConfig":
         return cls(
-            yandex_api_key=_strip(os.environ.get("YANDEX_API_KEY")),
-            yandex_folder_id=_strip(os.environ.get("YANDEX_FOLDER_ID")),
-            vector_store_id=_strip(os.environ.get("VECTOR_STORE_ID")),
+            amvera_api_token=_strip(os.environ.get("AMVERA_API_TOKEN")),
+            amvera_api_url=_strip(
+                os.environ.get("AMVERA_API_URL") or "https://llm.amvera.ai/v1"
+            ),
+            amvera_model=_strip(os.environ.get("AMVERA_MODEL")) or "deepseek-chat",
             allowed_origins=parse_allowed_origins(os.environ.get("ALLOWED_ORIGINS", "*")),
             cache_max_files=_parse_positive_int(
                 os.environ.get("CACHE_MAX_FILES"), default=32
@@ -93,11 +95,7 @@ class AppConfig:
 
     @property
     def has_api_credentials(self) -> bool:
-        return bool(self.yandex_api_key and self.yandex_folder_id)
-
-    @property
-    def can_use_vector_store(self) -> bool:
-        return bool(self.has_api_credentials and self.vector_store_id)
+        return bool(self.amvera_api_token)
 
 
 CONFIG = AppConfig.from_env()

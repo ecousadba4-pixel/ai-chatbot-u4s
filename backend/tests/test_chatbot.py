@@ -6,7 +6,7 @@ import pytest
 from backend.tests._helpers import DummyClient, DummyRequest, DummyStorage
 
 
-def test_rag_payload_uses_vector_store(app_module):
+def test_rag_payload_uses_deepseek(app_module):
     client: DummyClient = app_module.CLIENT  # type: ignore[assignment]
 
     messages = [
@@ -19,12 +19,9 @@ def test_rag_payload_uses_vector_store(app_module):
     assert len(client.calls) == 1
     payload = client.calls[0]
 
-    assert payload["tool_resources"]["file_search"]["vector_store_ids"] == [
-        app_module.CONFIG.vector_store_id
-    ]
+    assert payload["model"] == app_module.CONFIG.amvera_model
     assert pytest.approx(payload["temperature"]) == 0.3
     assert pytest.approx(payload["top_p"]) == 0.8
-    assert payload["max_output_tokens"] >= 1500
 
 
 def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
@@ -35,9 +32,9 @@ def test_vector_store_fallback_handles_api_errors(app_module, monkeypatch):
     )
 
     def _failing_call_responses(payload):
-        raise RuntimeError("Responses API HTTP 500: boom")
+        raise RuntimeError("Chat API HTTP 500: boom")
 
-    monkeypatch.setattr(app_module.CLIENT, "call_responses", _failing_call_responses)
+    monkeypatch.setattr(app_module.CLIENT, "call_chat", _failing_call_responses)
 
     messages = [
         {"role": "system", "content": app_module.SYSTEM_PROMPT_RAG},
