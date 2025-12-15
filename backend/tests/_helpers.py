@@ -16,27 +16,15 @@ class DummyClient:
         self.config = config
         self.calls: list[dict] = []
 
-    def call_responses(self, payload: dict):
+    def call_chat(self, payload: dict):
         self.calls.append(payload)
         return {
-            "output": [
+            "choices": [
                 {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "output_text", "text": "Ответ"},
-                    ],
+                    "message": {"role": "assistant", "content": "Ответ"},
                 }
             ]
         }
-
-    def list_vector_files(self):  # pragma: no cover - не используется
-        return []
-
-    def fetch_vector_meta(self, file_id: str):  # pragma: no cover - не используется
-        return {}
-
-    def fetch_vector_content(self, file_id: str):  # pragma: no cover - не используется
-        return ""
 
 
 class DummyStorage:
@@ -78,7 +66,7 @@ class DummyRequest:
 
 def load_app_module(monkeypatch):
     module_name = "backend.app"
-    for key in ("YANDEX_API_KEY", "YANDEX_FOLDER_ID", "VECTOR_STORE_ID"):
+    for key in ("AMVERA_API_TOKEN", "AMVERA_API_URL", "AMVERA_MODEL"):
         os.environ[key] = f"test-{key.lower()}"
 
     for dependency in [module_name, "backend.config", "backend.rag"]:
