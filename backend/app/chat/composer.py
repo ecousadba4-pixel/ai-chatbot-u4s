@@ -59,11 +59,11 @@ class ChatComposer:
     async def handle_booking(self, session_id: str, text: str) -> dict[str, Any]:
         state = self._store.get(session_id) or SlotState()
         state = self._slot_filler.extract(text, state)
-        missing = self._slot_filler.missing_slots(state)
+        clarification = self._slot_filler.clarification(state)
         self._store.set(session_id, state)
 
-        if missing:
-            question = self._slot_filler.prompt_for_missing(missing)
+        if clarification:
+            question = clarification
             return {
                 "answer": question,
                 "debug": {
