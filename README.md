@@ -31,9 +31,5 @@ pip install -r backend/requirements.txt
 uvicorn app.main:app --reload --app-dir backend
 ```
 
-## Удалено
-- Старый стек Amvera и все упоминания Yandex Vector DB / vector store.
-- Синхронные обёртки requests и устаревший роутинг `api/chat`.
-
 ## Расширение actions
 Новые сценарии действий (actions) можно подключать через маршрутизатор интентов (`app/chat/intent.py`) и реализовывать в `app/chat/composer.py`, сохраняя собственное состояние диалога и изолированные клиенты внешних систем.
