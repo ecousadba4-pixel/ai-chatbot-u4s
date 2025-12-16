@@ -393,7 +393,7 @@
     elements.input.focus();
 
     const typingNode = renderTyping();
-    const payload = { question: text, sessionId };
+    const payload = { message: text, question: text, sessionId };
     const recentHistory = collectHistory(4);
     if (recentHistory.length > 0) {
       payload.history = recentHistory;
@@ -437,7 +437,7 @@
     clearChatHistory();
     const typingNode = renderTyping();
 
-    const resetPayload = { reset: true, action: "reset", sessionId };
+    const resetPayload = { reset: true, action: "reset", sessionId, message: "" };
     if (lastKnownHistory.length > 0) {
       resetPayload.history = lastKnownHistory;
     }
