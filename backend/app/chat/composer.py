@@ -2,19 +2,27 @@ from typing import Any
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import asyncpg
 
 from app.core.config import Settings, get_settings
 from app.booking.entities import BookingEntities
-from app.booking.fsm import BookingState, initial_booking_context
+from app.booking.fsm import BookingContext, BookingState, initial_booking_context
 from app.booking.models import Guests
 from app.booking.service import BookingQuoteService
 from app.chat.formatting import (
     detect_detail_mode,
     format_shelter_quote,
     postprocess_answer,
+)
+from app.booking.parsers import (
+    parse_adults,
+    parse_checkin,
+    parse_children_ages,
+    parse_children_count,
+    parse_nights,
+    parse_room_type,
 )
 from app.booking.slot_filling import CHILDREN_PATTERNS, SlotFiller, SlotState
 from app.llm.amvera_client import AmveraLLMClient
@@ -79,8 +87,12 @@ class ChatComposer:
     def has_active_booking(
         self, session_id: str, entities: BookingEntities | None = None
     ) -> bool:
-        booking_context = self._booking_store.get(session_id)
-        if self._booking_fsm_active(booking_context):
+        booking_context = BookingContext.from_dict(self._booking_store.get(session_id))
+        if booking_context and booking_context.state not in (
+            BookingState.DONE,
+            BookingState.CANCELLED,
+            None,
+        ):
             return True
 
         state = self._store.get(session_id)
@@ -93,31 +105,15 @@ class ChatComposer:
     async def handle_booking_calculation(
         self, session_id: str, text: str, entities: BookingEntities
     ) -> dict[str, Any]:
-        booking = self._ensure_booking_context(session_id)
-        debug: dict[str, Any] = {
-            "intent": "booking_calculation",
-            "booking_state": str(getattr(booking.get("state"), "value", "")),
-            "booking_entities": dict(booking.get("entities", {})),
-            "missing_fields": self._missing_booking_state_fields(booking),
-            "shelter_called": False,
-            "shelter_latency_ms": 0,
-            "shelter_error": None,
-            "llm_called": False,
-        }
-
-        if self._should_reset_flow(text):
-            booking = initial_booking_context()
-
-        if booking.get("state") == BookingState.CALCULATE:
-            answer = self._handle_calculate_confirmation(session_id, text, booking)
-            self._booking_store.set(session_id, booking)
-            debug["booking_state"] = booking["state"].value
-            return {"answer": answer, "debug": debug}
-
-        response = await self._handle_booking_fsm(session_id, text, booking, debug)
-        debug["booking_state"] = booking["state"].value
-        debug["booking_entities"] = dict(booking.get("entities", {}))
-        return {"answer": response, "debug": debug}
+        context = self._load_booking_context(session_id)
+        debug = self._booking_debug(context)
+        answer = await self._handle_booking_message(
+            session_id, text, context, entities, debug
+        )
+        debug["booking_state"] = context.state.value if context.state else ""
+        debug["booking_entities"] = self._context_entities(context)
+        debug["missing_fields"] = self._missing_context_fields(context)
+        return {"answer": answer, "debug": debug}
 
     def _missing_booking_fields(self, state: SlotState) -> list[str]:
         missing: list[str] = []
@@ -153,249 +149,434 @@ class ChatComposer:
             or entities.children is not None
         )
 
-    def _ensure_booking_context(self, session_id: str) -> dict[str, Any]:
-        context = self._booking_store.get(session_id)
-        if not self._booking_fsm_active(context):
-            context = initial_booking_context()
-            self._booking_store.set(session_id, context)
+    def _load_booking_context(self, session_id: str) -> BookingContext:
+        context = BookingContext.from_dict(self._booking_store.get(session_id))
+        if context is None:
+            return initial_booking_context()
         return context
 
-    def _booking_fsm_active(self, context: Any) -> bool:
-        return isinstance(context, dict) and isinstance(
-            context.get("state"), BookingState
-        )
+    def _save_booking_context(self, session_id: str, context: BookingContext) -> None:
+        context.updated_at = datetime.utcnow().timestamp()
+        self._booking_store.set(session_id, context.to_dict())
 
-    def _should_reset_flow(self, text: str) -> bool:
-        normalized = text.strip().lower()
-        reset_triggers = {"начнём заново", "отмени", "другие даты", "с начала"}
-        return any(trigger in normalized for trigger in reset_triggers)
+    def _booking_debug(self, context: BookingContext) -> dict[str, Any]:
+        return {
+            "intent": "booking_calculation",
+            "booking_state": context.state.value if context.state else "",
+            "booking_entities": self._context_entities(context),
+            "missing_fields": self._missing_context_fields(context),
+            "shelter_called": False,
+            "shelter_latency_ms": 0,
+            "shelter_error": None,
+            "llm_called": False,
+        }
 
-    def _booking_prompt(self, question: str, booking: dict[str, Any], prefix: str | None = None) -> str:
-        summary = self._booking_summary(booking)
-        parts: list[str] = []
-        if summary:
-            parts.append(f"Понял: {summary}.")
-        if prefix:
-            parts.append(prefix)
-        parts.append(question)
-        return " ".join(parts)
+    def _context_entities(self, context: BookingContext) -> dict[str, Any]:
+        return {
+            "checkin": context.checkin,
+            "checkout": context.checkout,
+            "nights": context.nights,
+            "adults": context.adults,
+            "children": context.children,
+            "children_ages": context.children_ages,
+            "room_type": context.room_type,
+            "promo": context.promo,
+        }
 
-    def _booking_summary(self, booking: dict[str, Any]) -> str:
-        entities = booking.get("entities", {})
-        fragments: list[str] = []
-        checkin = entities.get("checkin")
-        if checkin:
-            fragments.append(f"заезд {self._format_date(checkin)}")
-        nights = entities.get("nights")
-        if nights:
-            fragments.append(f"ночей {nights}")
-        adults = entities.get("adults")
-        children = entities.get("children")
-        if adults is not None:
-            guests = f"взрослых {adults}"
-            if children is not None:
-                guests += f", детей {children}"
-            fragments.append(guests)
-        room_type = entities.get("room_type")
-        if room_type:
-            fragments.append(f"тип {room_type}")
-        return ", ".join(fragments)
+    def _missing_context_fields(self, context: BookingContext) -> list[str]:
+        missing: list[str] = []
+        if not context.checkin:
+            missing.append("checkin")
+        if not context.checkout and context.nights is None:
+            missing.append("checkout_or_nights")
+        if context.adults is None:
+            missing.append("adults")
+        if context.children is None:
+            missing.append("children")
+        if (context.children or 0) > 0 and not context.children_ages:
+            missing.append("children_ages")
+        if context.room_type is None:
+            missing.append("room_type")
+        return missing
 
-    def _reset_attempts(self, booking: dict[str, Any], state: BookingState) -> None:
-        booking.setdefault("attempts", {})
-        booking["attempts"].pop(state.value, None)
-
-    def _increment_attempts(self, booking: dict[str, Any], state: BookingState) -> int:
-        attempts = booking.setdefault("attempts", {})
-        attempts[state.value] = attempts.get(state.value, 0) + 1
-        return attempts[state.value]
-
-    async def _handle_booking_fsm(
+    async def _handle_booking_message(
         self,
         session_id: str,
         text: str,
-        booking: dict[str, Any],
+        context: BookingContext,
+        entities: BookingEntities,
         debug: dict[str, Any],
     ) -> str:
-        state: BookingState = booking["state"]
-        if state == BookingState.WAIT_CHECKIN:
-            extracted = self._slot_filler._extract_dates(text)  # noqa: SLF001
-            if extracted:
-                booking["entities"]["checkin"] = extracted[0]
-                booking["state"] = BookingState.WAIT_NIGHTS
-                self._reset_attempts(booking, state)
-                question = self._booking_prompt(
-                    "Сколько ночей планируете остаться?", booking
-                )
-                booking["last_question"] = question
-                self._booking_store.set(session_id, booking)
-                return question
-            question = self._booking_prompt(
-                "На какую дату планируете заезд?", booking
-            )
-            return self._repeat_or_reset(session_id, booking, question)
-
-        if state == BookingState.WAIT_NIGHTS:
-            nights = self._slot_filler._extract_nights(text)  # noqa: SLF001
-            if nights is None and text.strip().isdigit():
-                nights = int(text.strip())
-            if nights:
-                booking["entities"]["nights"] = nights
-                booking["state"] = BookingState.WAIT_ADULTS
-                self._reset_attempts(booking, state)
-                question = self._booking_prompt("Сколько взрослых едет?", booking)
-                booking["last_question"] = question
-                self._booking_store.set(session_id, booking)
-                return question
-            question = self._booking_prompt(
-                "Уточните, пожалуйста, на сколько ночей бронирование?", booking
-            )
-            return self._repeat_or_reset(session_id, booking, question)
-
-        if state == BookingState.WAIT_ADULTS:
-            adults = self._slot_filler._extract_adults(  # noqa: SLF001
-                text, allow_general_numbers=True
-            )
-            if adults is not None:
-                booking["entities"]["adults"] = adults
-                booking["state"] = BookingState.WAIT_CHILDREN
-                self._reset_attempts(booking, state)
-                question = self._booking_prompt("Будут ли дети?", booking)
-                booking["last_question"] = question
-                self._booking_store.set(session_id, booking)
-                return question
-            question = self._booking_prompt(
-                "Сколько взрослых едет?", booking, prefix="Ответьте числом"
-            )
-            return self._repeat_or_reset(session_id, booking, question)
-
-        if state == BookingState.WAIT_CHILDREN:
-            lowered = text.strip().lower()
-            negative_children = {"нет", "не будет", "без детей", "нет детей", "0"}
-            children = self._slot_filler._extract_first_number(  # noqa: SLF001
-                lowered, CHILDREN_PATTERNS
-            )
-            if lowered in negative_children:
-                children = 0
-            if children is not None:
-                booking["entities"]["children"] = children
-                next_state = (
-                    BookingState.WAIT_CHILDREN_AGES if children > 0 else BookingState.WAIT_ROOM_TYPE
-                )
-                booking["state"] = next_state
-                self._reset_attempts(booking, state)
-                if children == 0:
-                    booking["entities"].setdefault("room_type", "Студия")
-                    booking["state"] = BookingState.CALCULATE
-                    booking["last_question"] = "Оформляем бронирование?"
-                    self._booking_store.set(session_id, booking)
-                    return await self._calculate_booking(session_id, booking, debug)
-
-                question_text = "Уточните возраст детей (через запятую)."
-                question = self._booking_prompt(question_text, booking)
-                booking["last_question"] = question
-                self._booking_store.set(session_id, booking)
-                return question
-            question = self._booking_prompt("Будут ли дети?", booking)
-            return self._repeat_or_reset(session_id, booking, question)
-
-        if state == BookingState.WAIT_CHILDREN_AGES:
-            ages = self._slot_filler._extract_children_ages(text)  # noqa: SLF001
-            if ages:
-                booking["entities"]["children_ages"] = ages
-                booking["state"] = BookingState.WAIT_ROOM_TYPE
-                self._reset_attempts(booking, state)
-                question = self._booking_prompt(
-                    "Какой тип размещения предпочитаете: Студия, Шале, Шале Комфорт или Семейный номер?",
-                    booking,
-                )
-                booking["last_question"] = question
-                self._booking_store.set(session_id, booking)
-                return question
-            question = self._booking_prompt(
-                "Не услышал возраст детей, укажите числа через запятую.", booking
-            )
-            return self._repeat_or_reset(session_id, booking, question)
-
-        if state == BookingState.WAIT_ROOM_TYPE:
-            room_type = self._slot_filler._extract_room_type(text)  # noqa: SLF001
-            if room_type:
-                booking["entities"]["room_type"] = room_type
-                booking["state"] = BookingState.CALCULATE
-                self._reset_attempts(booking, state)
-                answer = await self._calculate_booking(session_id, booking, debug)
-                return answer
-            question = self._booking_prompt(
-                "Выберите тип размещения: Студия, Шале, Шале Комфорт или Семейный номер.",
-                booking,
-            )
-            return self._repeat_or_reset(session_id, booking, question)
-
-        # Default fallback for any unexpected state
-        booking["state"] = BookingState.WAIT_CHECKIN
-        self._booking_store.set(session_id, booking)
-        return "На какую дату планируете заезд?"
-
-    def _repeat_or_reset(
-        self, session_id: str, booking: dict[str, Any], question: str
-    ) -> str:
-        attempts = self._increment_attempts(booking, booking["state"])
-        if attempts >= self._max_state_attempts:
-            booking.clear()
-            booking.update(initial_booking_context())
-            question = "Давайте начнём заново. На какую дату планируете заезд?"
-        booking["last_question"] = question
-        self._booking_store.set(session_id, booking)
-        return question
-
-    def _missing_booking_state_fields(self, booking: dict[str, Any]) -> list[str]:
-        entities = booking.get("entities", {})
-        missing = [key for key, value in entities.items() if value in (None, [])]
-        return missing
-
-    def _handle_calculate_confirmation(
-        self, session_id: str, text: str, booking: dict[str, Any]
-    ) -> str:
         normalized = text.strip().lower()
-        if any(token in normalized for token in {"да", "оформляй", "подтверждаю"}):
-            booking["state"] = BookingState.DONE
-            return "Отлично, фиксирую бронирование. Если захотите изменить детали, скажите \"начнём заново\"."
+        if self._is_cancel_command(normalized):
+            context.state = BookingState.CANCELLED
+            self._booking_store.clear(session_id)
+            return "Отменяю бронирование. Если понадобится помощь, напишите."
 
-        if any(token in normalized for token in {"нет", "пока"}):
-            return "Хорошо, расчёт сохранён. Если нужно изменить даты, напишите \"начнём заново\"."
+        if context.state in (None, BookingState.DONE, BookingState.CANCELLED):
+            context.state = BookingState.ASK_CHECKIN
 
-        question = booking.get("last_question") or "Оформляем бронирование?"
-        return self._repeat_or_reset(session_id, booking, question)
+        if self._is_back_command(normalized):
+            self._go_back(context)
+
+        logger.info(
+            "BOOKING_FSM state=%s ctx=%s message=%s",
+            context.state,
+            context.compact(),
+            text,
+        )
+
+        self._apply_entities_to_context(context, entities)
+        self._apply_entities_from_message(context, text)
+
+        answer = await self._advance_booking_fsm(session_id, context, text, debug)
+        self._save_booking_context(session_id, context)
+        return answer
+
+    def _apply_entities_to_context(
+        self, context: BookingContext, entities: BookingEntities
+    ) -> None:
+        if not context.checkin:
+            context.checkin = entities.checkin
+        if not context.checkout:
+            context.checkout = entities.checkout
+        if context.nights is None:
+            context.nights = entities.nights
+        if context.adults is None:
+            context.adults = entities.adults
+        if context.children is None:
+            context.children = entities.children
+        if not context.children_ages and entities.children is not None and entities.children <= 0:
+            context.children_ages = []
+        if context.room_type is None:
+            context.room_type = entities.room_type
+
+    def _apply_entities_from_message(self, context: BookingContext, text: str) -> None:
+        if not context.checkin:
+            context.checkin = parse_checkin(text)
+        if context.nights is None and not context.checkout:
+            context.nights = parse_nights(text)
+        if not context.checkout and context.checkin:
+            try:
+                checkin_date = date.fromisoformat(context.checkin)
+            except ValueError:
+                checkin_date = None
+            parsed_checkout = parse_checkin(text, now_date=checkin_date or date.today())
+            if parsed_checkout and parsed_checkout != context.checkin:
+                try:
+                    checkout_date = date.fromisoformat(parsed_checkout)
+                except ValueError:
+                    checkout_date = None
+                if checkout_date and checkin_date and checkout_date > checkin_date:
+                    context.checkout = parsed_checkout
+        if context.adults is None:
+            allow_general_adults = context.state in {
+                BookingState.ASK_ADULTS,
+                BookingState.ASK_CHILDREN_COUNT,
+                BookingState.ASK_CHILDREN_AGES,
+                BookingState.ASK_ROOM_TYPE,
+                BookingState.CALCULATE,
+                BookingState.CONFIRM_BOOKING,
+            }
+            adults = parse_adults(text, allow_general_numbers=allow_general_adults)
+            if adults is not None:
+                context.adults = adults
+        if context.children is None:
+            context.children = parse_children_count(text)
+        if (context.children or 0) > 0 and not context.children_ages:
+            context.children_ages = parse_children_ages(text, expected=context.children)
+        if context.room_type is None:
+            context.room_type = parse_room_type(text)
+
+    def _ask_with_retry(self, context: BookingContext, state: BookingState, question: str) -> str:
+        attempts = context.retries.get(state.value, 0) + 1
+        context.retries[state.value] = attempts
+        if attempts >= self._max_state_attempts:
+            context.retries.clear()
+            context.state = BookingState.ASK_CHECKIN
+            context.checkin = None
+            context.checkout = None
+            context.nights = None
+            context.adults = None
+            context.children = None
+            context.children_ages = []
+            context.room_type = None
+            return "Давайте начнём заново. На какую дату планируете заезд?"
+        return self._booking_prompt(question, context)
+
+    def _go_back(self, context: BookingContext) -> None:
+        previous = self._previous_state(context.state)
+        if previous == BookingState.ASK_CHECKIN:
+            context.checkin = None
+            context.nights = None
+            context.checkout = None
+        if previous == BookingState.ASK_NIGHTS_OR_CHECKOUT:
+            context.nights = None
+            context.checkout = None
+        if previous == BookingState.ASK_ADULTS:
+            context.adults = None
+        if previous == BookingState.ASK_CHILDREN_COUNT:
+            context.children = None
+            context.children_ages = []
+        if previous == BookingState.ASK_CHILDREN_AGES:
+            context.children_ages = []
+        if previous is not None:
+            context.state = previous
+
+    def _previous_state(self, state: BookingState | None) -> BookingState | None:
+        order = [
+            BookingState.ASK_CHECKIN,
+            BookingState.ASK_NIGHTS_OR_CHECKOUT,
+            BookingState.ASK_ADULTS,
+            BookingState.ASK_CHILDREN_COUNT,
+            BookingState.ASK_CHILDREN_AGES,
+            BookingState.ASK_ROOM_TYPE,
+            BookingState.CALCULATE,
+            BookingState.CONFIRM_BOOKING,
+        ]
+        if state in order:
+            idx = order.index(state)
+            return order[idx - 1] if idx > 0 else BookingState.ASK_CHECKIN
+        return BookingState.ASK_CHECKIN
+
+    async def _advance_booking_fsm(
+        self,
+        session_id: str,
+        context: BookingContext,
+        text: str,
+        debug: dict[str, Any],
+    ) -> str:
+        state = context.state or BookingState.ASK_CHECKIN
+        consumed_fields: set[str] = set()
+        if context.nights is not None:
+            consumed_fields.add("nights")
+        if context.adults is not None:
+            consumed_fields.add("adults")
+        while True:
+            if state == BookingState.ASK_CHECKIN:
+                context.state = BookingState.ASK_CHECKIN
+                if context.checkin:
+                    state = BookingState.ASK_NIGHTS_OR_CHECKOUT
+                    continue
+                parsed = parse_checkin(text)
+                if parsed:
+                    context.checkin = parsed
+                    context.state = BookingState.ASK_NIGHTS_OR_CHECKOUT
+                    state = BookingState.ASK_NIGHTS_OR_CHECKOUT
+                    continue
+                return self._ask_with_retry(context, BookingState.ASK_CHECKIN, "На какую дату планируете заезд?")
+
+            if state == BookingState.ASK_NIGHTS_OR_CHECKOUT:
+                context.state = BookingState.ASK_NIGHTS_OR_CHECKOUT
+                if context.nights is not None or context.checkout:
+                    state = BookingState.ASK_ADULTS
+                    continue
+                nights = parse_nights(text)
+                checkout_value = None
+                try:
+                    checkin_date = date.fromisoformat(context.checkin) if context.checkin else None
+                except ValueError:
+                    checkin_date = None
+                if checkin_date:
+                    parsed_checkout = parse_checkin(text, now_date=checkin_date)
+                    if parsed_checkout:
+                        try:
+                            checkout_date = date.fromisoformat(parsed_checkout)
+                        except ValueError:
+                            checkout_date = None
+                        if checkout_date and checkout_date > checkin_date:
+                            checkout_value = parsed_checkout
+                if nights:
+                    context.nights = nights
+                    consumed_fields.add("nights")
+                    state = BookingState.ASK_ADULTS
+                    context.state = BookingState.ASK_ADULTS
+                    continue
+                if checkout_value:
+                    context.checkout = checkout_value
+                    state = BookingState.ASK_ADULTS
+                    context.state = BookingState.ASK_ADULTS
+                    continue
+                return self._ask_with_retry(
+                    context,
+                    BookingState.ASK_NIGHTS_OR_CHECKOUT,
+                    "Сколько ночей остаётесь или до какого числа?",
+                )
+
+            if state == BookingState.ASK_ADULTS:
+                context.state = BookingState.ASK_ADULTS
+                if context.adults is not None:
+                    state = BookingState.ASK_CHILDREN_COUNT
+                    continue
+                allow_general = "nights" not in consumed_fields
+                adults = parse_adults(text, allow_general_numbers=allow_general)
+                if adults is not None:
+                    context.adults = adults
+                    consumed_fields.add("adults")
+                    state = BookingState.ASK_CHILDREN_COUNT
+                    context.state = BookingState.ASK_CHILDREN_COUNT
+                    continue
+                return self._ask_with_retry(context, BookingState.ASK_ADULTS, "Сколько взрослых едет?")
+
+            if state == BookingState.ASK_CHILDREN_COUNT:
+                context.state = BookingState.ASK_CHILDREN_COUNT
+                if context.children is not None:
+                    if (context.children or 0) > 0:
+                        state = BookingState.ASK_CHILDREN_AGES
+                    else:
+                        if context.room_type is None:
+                            context.room_type = "Студия"
+                        state = BookingState.CALCULATE
+                    continue
+                children = parse_children_count(text)
+                if children is not None:
+                    context.children = children
+                    if children > 0:
+                        state = BookingState.ASK_CHILDREN_AGES
+                        context.state = BookingState.ASK_CHILDREN_AGES
+                    else:
+                        if context.room_type is None:
+                            context.room_type = "Студия"
+                        state = BookingState.CALCULATE
+                        context.state = BookingState.CALCULATE
+                    continue
+                return self._ask_with_retry(context, BookingState.ASK_CHILDREN_COUNT, "Будут ли дети? Укажите число или 'нет'.")
+
+            if state == BookingState.ASK_CHILDREN_AGES:
+                context.state = BookingState.ASK_CHILDREN_AGES
+                if (context.children or 0) == 0:
+                    state = BookingState.ASK_ROOM_TYPE
+                    continue
+                if context.children_ages and len(context.children_ages) == context.children:
+                    state = BookingState.ASK_ROOM_TYPE
+                    continue
+                ages = parse_children_ages(text, expected=context.children)
+                if ages:
+                    context.children_ages = ages
+                    state = BookingState.ASK_ROOM_TYPE
+                    context.state = BookingState.ASK_ROOM_TYPE
+                    continue
+                return self._ask_with_retry(
+                    context,
+                    BookingState.ASK_CHILDREN_AGES,
+                    "Не услышал возраст детей, укажите числа через запятую.",
+                )
+
+            if state == BookingState.ASK_ROOM_TYPE:
+                context.state = BookingState.ASK_ROOM_TYPE
+                if context.room_type:
+                    state = BookingState.CALCULATE
+                    continue
+                room_type = parse_room_type(text)
+                if room_type:
+                    context.room_type = room_type
+                    state = BookingState.CALCULATE
+                    continue
+                return self._ask_with_retry(
+                    context,
+                    BookingState.ASK_ROOM_TYPE,
+                    "Какой тип размещения предпочитаете: Студия, Шале, Шале Комфорт или Семейный номер?",
+                )
+
+            if state == BookingState.CALCULATE:
+                context.state = BookingState.CALCULATE
+                answer = await self._calculate_booking(context, debug)
+                return answer
+
+            if state == BookingState.CONFIRM_BOOKING:
+                context.state = BookingState.CONFIRM_BOOKING
+                return self._handle_confirmation(text, context)
+
+            return self._ask_with_retry(
+                context, BookingState.ASK_CHECKIN, "На какую дату планируете заезд?"
+            )
+
+    def _booking_prompt(self, question: str, context: BookingContext) -> str:
+        summary = self._booking_summary(context)
+        parts: list[str] = []
+        if summary:
+            parts.append(f"Понял: {summary}.")
+        parts.append(question)
+        return " ".join(parts)
+
+    def _booking_summary(self, context: BookingContext) -> str:
+        fragments: list[str] = []
+        if context.checkin:
+            fragments.append(f"заезд {self._format_date(context.checkin)}")
+        if context.nights:
+            fragments.append(f"ночей {context.nights}")
+        elif context.checkout:
+            fragments.append(f"выезд {self._format_date(context.checkout)}")
+        if context.adults is not None:
+            guests = f"взрослых {context.adults}"
+            if context.children is not None:
+                guests += f", детей {context.children}"
+            fragments.append(guests)
+        if context.room_type:
+            fragments.append(f"тип {context.room_type}")
+        return ", ".join(fragments)
 
     async def _calculate_booking(
-        self, session_id: str, booking: dict[str, Any], debug: dict[str, Any]
+        self, context: BookingContext, debug: dict[str, Any]
     ) -> str:
-        entities = booking["entities"]
-        checkin = entities.get("checkin")
-        nights = entities.get("nights")
-        adults = entities.get("adults")
-        children = entities.get("children") or 0
+        if not context.checkin:
+            context.state = BookingState.ASK_CHECKIN
+            return self._booking_prompt("На какую дату планируете заезд?", context)
 
-        checkout: str | None = None
-        if checkin and nights:
-            try:
-                checkin_date = date.fromisoformat(checkin)
-                checkout = (checkin_date + timedelta(days=int(nights))).isoformat()
-            except ValueError:
-                checkout = None
-
-        guests = Guests(adults=adults or 0, children=children)
-
-        if not (checkin and checkout and adults is not None):
-            booking["state"] = BookingState.WAIT_CHECKIN
-            self._booking_store.set(session_id, booking)
-            return "Не удалось собрать данные для расчёта. На какую дату планируете заезд?"
-
-        started = time.perf_counter()
         try:
+            checkin_date = date.fromisoformat(context.checkin)
+        except ValueError:
+            context.checkin = None
+            context.state = BookingState.ASK_CHECKIN
+            return self._booking_prompt("Укажите корректную дату заезда.", context)
+
+        nights = context.nights
+        if nights is not None and nights > 0:
+            context.checkout = (checkin_date + timedelta(days=nights)).isoformat()
+        elif context.checkout:
+            try:
+                checkout_date = date.fromisoformat(context.checkout)
+            except ValueError:
+                context.checkout = None
+                return self._ask_with_retry(
+                    context, BookingState.ASK_NIGHTS_OR_CHECKOUT, "Укажите дату выезда или количество ночей."
+                )
+            if checkout_date <= checkin_date:
+                context.checkout = None
+                return self._ask_with_retry(
+                    context, BookingState.ASK_NIGHTS_OR_CHECKOUT, "Дата выезда должна быть позже даты заезда."
+                )
+            context.nights = (checkout_date - checkin_date).days
+            nights = context.nights
+        else:
+            return self._ask_with_retry(
+                context, BookingState.ASK_NIGHTS_OR_CHECKOUT, "Сколько ночей остаётесь или до какого числа?"
+            )
+
+        if context.adults is None:
+            context.state = BookingState.ASK_ADULTS
+            return self._ask_with_retry(context, BookingState.ASK_ADULTS, "Сколько взрослых едет?")
+
+        if (context.children or 0) > 0 and not context.children_ages:
+            context.state = BookingState.ASK_CHILDREN_AGES
+            return self._ask_with_retry(
+                context, BookingState.ASK_CHILDREN_AGES, "Не услышал возраст детей, укажите числа через запятую."
+            )
+
+        if context.room_type is None:
+            context.room_type = "Студия"
+
+        guests = Guests(
+            adults=context.adults,
+            children=context.children or 0,
+            children_ages=context.children_ages,
+        )
+
+        try:
+            started = time.perf_counter()
             offers = await self._booking_service.get_quotes(
-                check_in=checkin,
-                check_out=checkout,
+                check_in=context.checkin,
+                check_out=context.checkout,
                 guests=guests,
             )
             debug["shelter_called"] = True
@@ -403,29 +584,55 @@ class ChatComposer:
         except Exception as exc:  # noqa: BLE001
             debug["shelter_called"] = True
             debug["shelter_error"] = str(exc)
-            booking["state"] = BookingState.WAIT_CHECKIN
-            self._booking_store.set(session_id, booking)
+            context.state = BookingState.ASK_CHECKIN
             return "Не получилось получить расчёт, давайте попробуем ещё раз. На какую дату планируете заезд?"
 
         if not offers:
-            booking["state"] = BookingState.DONE
-            self._booking_store.set(session_id, booking)
+            context.state = BookingState.DONE
             return "К сожалению, нет доступных вариантов на выбранные даты. Если хотите изменить параметры, скажите \"начнём заново\"."
 
         booking_entities = BookingEntities(
-            checkin=checkin,
-            checkout=checkout,
-            adults=adults,
-            children=children,
+            checkin=context.checkin,
+            checkout=context.checkout,
+            adults=context.adults,
+            children=context.children or 0,
             nights=nights,
-            room_type=entities.get("room_type"),
+            room_type=context.room_type,
             missing_fields=[],
         )
         price_block = format_shelter_quote(booking_entities, offers)
-        cta = "Оформляем бронирование?"
-        booking["last_question"] = cta
-        self._booking_store.set(session_id, booking)
-        return f"{price_block}\n\n{cta}"
+        context.state = BookingState.CONFIRM_BOOKING
+        return f"{price_block}\n\nОформляем бронирование?"
+
+    def _handle_confirmation(self, text: str, context: BookingContext) -> str:
+        normalized = text.strip().lower()
+        if any(token in normalized for token in {"да", "оформляй", "подтверждаю", "ок"}):
+            context.state = BookingState.DONE
+            return "Отлично, фиксирую бронирование. Если захотите изменить детали, скажите \"начнём заново\"."
+        if any(token in normalized for token in {"нет", "отмена", "стоп", "не"}):
+            context.state = BookingState.DONE
+            return "Ок, если захотите изменить детали, скажите \"начнём заново\"."
+        if "дат" in normalized:
+            context.state = BookingState.ASK_CHECKIN
+            context.checkin = None
+            context.checkout = None
+            context.nights = None
+            return self._booking_prompt("Изменим даты. На какую дату планируете заезд?", context)
+        if "гост" in normalized or "люд" in normalized:
+            context.state = BookingState.ASK_ADULTS
+            context.adults = None
+            context.children = None
+            context.children_ages = []
+            return self._booking_prompt("Сколько взрослых едет?", context)
+        return self._ask_with_retry(
+            context, BookingState.CONFIRM_BOOKING, "Оформляем бронирование?"
+        )
+
+    def _is_cancel_command(self, normalized: str) -> bool:
+        return normalized in {"отмена", "отменить", "стоп", "cancel", "отмени"}
+
+    def _is_back_command(self, normalized: str) -> bool:
+        return normalized in {"назад", "вернись", "вернуться"}
 
     def _next_booking_question(self, state: SlotState) -> str | None:
         if not state.check_in:
