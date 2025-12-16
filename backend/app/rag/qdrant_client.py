@@ -51,6 +51,35 @@ class QdrantClient:
                 return []
         return []
 
+    async def scroll(
+        self,
+        *,
+        collection: str,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        url = f"{self._base_url}/collections/{collection}/points/scroll"
+        payload: dict[str, Any] = {"limit": limit, "with_payload": True}
+
+        async for attempt in AsyncRetrying(
+            reraise=True,
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+            retry=retry_if_exception_type(httpx.HTTPError),
+        ):
+            with attempt:
+                response = await self._client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    return []
+                result = data.get("result")
+                if isinstance(result, dict):
+                    points = result.get("points") or []
+                    if isinstance(points, list):
+                        return [item for item in points if isinstance(item, dict)]
+                return []
+        return []
+
 
 _CLIENT: QdrantClient | None = None
 

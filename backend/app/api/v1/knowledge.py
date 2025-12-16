@@ -49,24 +49,30 @@ async def knowledge_search(
 
     results: list[KnowledgeResult] = []
 
-    for hit in rag_hits.get("facts_hits", []):
-        results.append(
-            KnowledgeResult(
-                type=hit.get("type") or "fact",
-                title=hit.get("title"),
-                content=hit.get("text") or "",
-                source=hit.get("source"),
-                score=float(hit.get("score", 0.0) or 0.0),
-            )
-        )
+    qdrant_hits = rag_hits.get("qdrant_hits")
+    if qdrant_hits is None:
+        qdrant_hits = [
+            *rag_hits.get("facts_hits", []),
+            *rag_hits.get("files_hits", []),
+        ]
 
-    for hit in rag_hits.get("files_hits", []):
+    for hit in qdrant_hits:
+        payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+        content = payload.get("text") or hit.get("text") or ""
+        title = payload.get("title") or hit.get("title")
+        source = payload.get("source") or hit.get("source")
+        if not title:
+            if isinstance(source, str) and source:
+                title = source
+            elif isinstance(content, str) and content:
+                title = content[:60]
+
         results.append(
             KnowledgeResult(
-                type=hit.get("type") or "file",
-                title=hit.get("title"),
-                content=hit.get("text") or "",
-                source=hit.get("source"),
+                type=(payload.get("type") or hit.get("type") or "fact"),
+                title=title,
+                content=content,
+                source=source,
                 score=float(hit.get("score", 0.0) or 0.0),
             )
         )
@@ -82,15 +88,22 @@ async def knowledge_search(
             )
         )
 
+    results.sort(key=lambda item: (item.type != "faq", -item.score))
     results = results[: payload.limit]
 
     debug: dict[str, Any] = {
         "facts_hits": len(rag_hits.get("facts_hits", [])),
         "files_hits": len(rag_hits.get("files_hits", [])),
+        "qdrant_hits": len(qdrant_hits),
         "faq_hits": len(rag_hits.get("faq_hits", [])),
         "hits_total": rag_hits.get("hits_total", 0),
         "rag_latency_ms": rag_hits.get("rag_latency_ms", 0),
         "embed_latency_ms": rag_hits.get("embed_latency_ms", 0),
+        "raw_qdrant_hits": rag_hits.get("raw_qdrant_hits", []),
+        "min_score": rag_hits.get("min_score"),
+        "max_score": rag_hits.get("max_score"),
+        "score_threshold_used": rag_hits.get("score_threshold_used"),
+        "filtered_out_count": rag_hits.get("filtered_out_count", 0),
     }
     if rag_hits.get("embed_error"):
         debug["embed_error"] = rag_hits["embed_error"]

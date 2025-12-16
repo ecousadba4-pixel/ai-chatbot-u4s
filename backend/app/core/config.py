@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     rag_context_chars: int = Field(4000, alias="RAG_CONTEXT_CHARS")
     rag_max_snippets: int = Field(8, alias="RAG_MAX_SNIPPETS")
     rag_min_facts: int = Field(4, alias="RAG_MIN_FACTS")
+    rag_score_threshold: float = Field(0.2, alias="RAG_SCORE_THRESHOLD")
     amvera_api_token: str = Field(..., alias="AMVERA_API_TOKEN")
     amvera_api_url: AnyHttpUrl = Field(
         "https://llm.amvera.ai", alias="AMVERA_API_URL"

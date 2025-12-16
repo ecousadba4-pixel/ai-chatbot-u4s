@@ -283,44 +283,46 @@ async def gather_rag_data(
         return {
             "facts_hits": [],
             "files_hits": [],
+            "qdrant_hits": [],
             "faq_hits": [],
             "hits_total": 0,
             "rag_latency_ms": int((time.perf_counter() - rag_started) * 1000),
             "embed_error": embed_error,
             "embed_latency_ms": embed_latency_ms,
+            "raw_qdrant_hits": [],
+            "min_score": None,
+            "max_score": None,
+            "score_threshold_used": settings.rag_score_threshold,
+            "filtered_out_count": 0,
         }
 
-    try:
-        facts_raw = await qdrant_search(
-            vector,
-            client=client,
-            limit=facts_limit or settings.rag_facts_limit,
-            source_prefix="postgres:u4s_chatbot",
-        )
-    except Exception as exc:  # pragma: no cover - сеть/хранилище
-        logger.error("Facts search failed: %s", exc)
-        facts_raw = []
-
-    dedup_keys: set[str] = set()
-    facts_hits = _deduplicate_hits(
-        [_normalize_hit(item) for item in facts_raw], seen=dedup_keys
+    search_limit = max(
+        facts_limit or settings.rag_facts_limit,
+        files_limit or settings.rag_files_limit,
     )
 
-    files_hits: list[dict[str, Any]] = []
-    if len(facts_hits) < settings.rag_min_facts:
-        try:
-            files_raw = await qdrant_search(
-                vector,
-                client=client,
-                limit=files_limit or settings.rag_files_limit,
-                source_prefix="file:",
-            )
-        except Exception as exc:  # pragma: no cover - сеть/хранилище
-            logger.error("Files search failed: %s", exc)
-            files_raw = []
-        files_hits = _deduplicate_hits(
-            [_normalize_hit(item) for item in files_raw], seen=dedup_keys
+    try:
+        qdrant_raw = await qdrant_search(
+            vector,
+            client=client,
+            limit=search_limit,
         )
+    except Exception as exc:  # pragma: no cover - сеть/хранилище
+        logger.error("Qdrant search failed: %s", exc)
+        qdrant_raw = []
+
+    normalized_hits = [_normalize_hit(item) for item in qdrant_raw]
+    normalized_hits = _deduplicate_hits(normalized_hits)
+    scores = [hit.get("score", 0.0) for hit in normalized_hits]
+    min_score = min(scores) if scores else None
+    max_score = max(scores) if scores else None
+
+    threshold = settings.rag_score_threshold
+    filtered_hits = [
+        hit for hit in normalized_hits if hit.get("score", 0.0) >= threshold
+    ]
+    filtered_hits.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    filtered_out_count = len(normalized_hits) - len(filtered_hits)
 
     try:
         faq_hits = await search_faq(
@@ -330,17 +332,23 @@ async def gather_rag_data(
         logger.error("FAQ search failed: %s", exc)
         faq_hits = []
 
-    hits_total = len(facts_hits) + len(files_hits) + len(faq_hits)
+    hits_total = len(filtered_hits) + len(faq_hits)
     rag_latency_ms = int((time.perf_counter() - rag_started) * 1000)
 
     return {
-        "facts_hits": facts_hits,
-        "files_hits": files_hits,
+        "facts_hits": filtered_hits,
+        "files_hits": [],
+        "qdrant_hits": filtered_hits,
         "faq_hits": faq_hits,
         "hits_total": hits_total,
         "rag_latency_ms": rag_latency_ms,
         "embed_error": embed_error,
         "embed_latency_ms": embed_latency_ms,
+        "raw_qdrant_hits": qdrant_raw,
+        "min_score": min_score,
+        "max_score": max_score,
+        "score_threshold_used": threshold,
+        "filtered_out_count": filtered_out_count,
     }
 
 

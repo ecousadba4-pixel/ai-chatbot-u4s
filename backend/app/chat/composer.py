@@ -138,15 +138,19 @@ class ChatComposer:
             faq_min_similarity=0.35,
         )
 
-        raw_facts_hits = rag_hits.get("facts_hits", [])
-        raw_files_hits = rag_hits.get("files_hits", [])
+        qdrant_hits = rag_hits.get("qdrant_hits")
+        if qdrant_hits is None:
+            qdrant_hits = [
+                *rag_hits.get("facts_hits", []),
+                *rag_hits.get("files_hits", []),
+            ]
         faq_hits = rag_hits.get("faq_hits", [])
 
-        hits_total = rag_hits.get("hits_total", len(raw_facts_hits) + len(raw_files_hits) + len(faq_hits))
+        hits_total = rag_hits.get("hits_total", len(qdrant_hits) + len(faq_hits))
 
         max_snippets = max(1, settings.rag_max_snippets)
-        facts_hits = raw_facts_hits[:max_snippets]
-        files_hits = raw_files_hits[: max(0, max_snippets - len(facts_hits))]
+        facts_hits = qdrant_hits[:max_snippets]
+        files_hits: list[dict[str, Any]] = []
         context_text = build_context(
             facts_hits=facts_hits,
             files_hits=files_hits,
@@ -162,6 +166,7 @@ class ChatComposer:
             "context_length": len(context_text),
             "facts_hits": len(facts_hits),
             "files_hits": len(files_hits),
+            "qdrant_hits": len(qdrant_hits),
             "faq_hits": len(faq_hits),
             "rag_min_facts": settings.rag_min_facts,
             "hits_total": hits_total,
@@ -172,6 +177,8 @@ class ChatComposer:
         debug["embed_latency_ms"] = rag_hits.get("embed_latency_ms", 0)
         if rag_hits.get("embed_error"):
             debug["embed_error"] = rag_hits["embed_error"]
+        debug["raw_qdrant_hits"] = rag_hits.get("raw_qdrant_hits", [])
+        debug["score_threshold_used"] = rag_hits.get("score_threshold_used")
 
         if hits_total < settings.rag_min_facts:
             debug["guard_triggered"] = True
