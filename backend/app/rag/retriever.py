@@ -2,47 +2,100 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+import logging
+import time
+
+import asyncpg
 import httpx
 
 from app.core.config import get_settings
+from app.db.queries.faq import search_faq
 from app.rag.qdrant_client import QdrantClient
 
 
-def _extract_embedding(data: Any) -> list[float]:
-    if isinstance(data, list) and all(isinstance(x, (int, float)) for x in data):
-        return [float(x) for x in data]
+logger = logging.getLogger(__name__)
+
+
+def _normalize_vector(vector: Any) -> list[float]:
+    if isinstance(vector, list):
+        floats = [float(x) for x in vector if isinstance(x, (int, float))]
+        if floats:
+            return floats
+    return []
+
+
+def _extract_embeddings(data: Any) -> list[list[float]]:
+    embeddings: list[list[float]] = []
 
     if isinstance(data, dict):
-        for key in ("embedding", "vector"):
+        for key in ("embeddings", "vectors", "data", "result"):
             value = data.get(key)
             if isinstance(value, list):
-                return [float(x) for x in value if isinstance(x, (int, float))]
+                embeddings.extend(_extract_embeddings(value))
+        for key in ("embedding", "vector"):
+            vector = _normalize_vector(data.get(key))
+            if vector:
+                embeddings.append(vector)
+        return embeddings
 
-        data_field = data.get("data")
-        if isinstance(data_field, dict):
-            for key in ("embedding", "vector"):
-                value = data_field.get(key)
-                if isinstance(value, list):
-                    return [float(x) for x in value if isinstance(x, (int, float))]
-        if isinstance(data_field, list) and data_field:
-            first = data_field[0]
-            if isinstance(first, dict):
-                nested = first.get("embedding") or first.get("vector")
-                if isinstance(nested, list):
-                    return [float(x) for x in nested if isinstance(x, (int, float))]
+    if isinstance(data, list):
+        if data and all(isinstance(x, (int, float)) for x in data):
+            vector = _normalize_vector(data)
+            if vector:
+                embeddings.append(vector)
+            return embeddings
 
-    return []
+        for item in data:
+            if isinstance(item, dict):
+                for key in ("embedding", "vector"):
+                    vector = _normalize_vector(item.get(key))
+                    if vector:
+                        embeddings.append(vector)
+                continue
+            vector = _normalize_vector(item)
+            if vector:
+                embeddings.append(vector)
+
+    return embeddings
+
+
+async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str | None]:
+    settings = get_settings()
+
+    if not texts:
+        return [], None
+
+    timeout = httpx.Timeout(
+        connect=settings.embed_timeout,
+        read=settings.embed_timeout,
+        write=settings.embed_timeout,
+        pool=settings.embed_timeout,
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(str(settings.embed_url), json={"inputs": texts})
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:  # pragma: no cover - сетевые ошибки
+        logger.error("Embedding request failed: %s", exc, extra={"embed_error": str(exc)})
+        return [], str(exc)
+    except ValueError as exc:  # pragma: no cover - невалидный JSON
+        logger.error("Failed to parse embedding response: %s", exc, extra={"embed_error": str(exc)})
+        return [], str(exc)
+
+    embeddings = _extract_embeddings(data)
+    if not embeddings:
+        logger.warning("Embedding service returned empty embeddings", extra={"embed_error": "empty_embeddings"})
+        return [], "empty_embeddings"
+    return embeddings, None
 
 
 async def embed_query(text: str) -> list[float]:
     """Запрашивает embedding у внешнего сервиса."""
 
-    settings = get_settings()
-    async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
-        response = await client.post(str(settings.embed_url), json={"text": text})
-        response.raise_for_status()
-        data = response.json()
-    return _extract_embedding(data)
+    embeddings, _ = await embed_texts([text])
+    return embeddings[0] if embeddings else []
 
 
 def _build_filter(*, source_prefix: str | None, types: Iterable[str] | None) -> dict[str, Any] | None:
@@ -166,6 +219,84 @@ async def retrieve_context(query: str, *, client: QdrantClient) -> dict[str, lis
     return {"facts_hits": facts_hits, "files_hits": files_hits}
 
 
+async def gather_rag_data(
+    query: str,
+    *,
+    client: QdrantClient,
+    pool: asyncpg.Pool,
+    facts_limit: int | None = None,
+    files_limit: int | None = None,
+    faq_limit: int = 3,
+    faq_min_similarity: float = 0.35,
+) -> dict[str, Any]:
+    settings = get_settings()
+    rag_started = time.perf_counter()
+
+    embeddings, embed_error = await embed_texts([query])
+    vector = embeddings[0] if embeddings else []
+    if not vector:
+        return {
+            "facts_hits": [],
+            "files_hits": [],
+            "faq_hits": [],
+            "hits_total": 0,
+            "rag_latency_ms": int((time.perf_counter() - rag_started) * 1000),
+            "embed_error": embed_error,
+        }
+
+    try:
+        facts_raw = await qdrant_search(
+            vector,
+            client=client,
+            limit=facts_limit or settings.rag_facts_limit,
+            source_prefix="postgres:u4s_chatbot",
+        )
+    except Exception as exc:  # pragma: no cover - сеть/хранилище
+        logger.error("Facts search failed: %s", exc)
+        facts_raw = []
+
+    dedup_keys: set[str] = set()
+    facts_hits = _deduplicate_hits(
+        [_normalize_hit(item) for item in facts_raw], seen=dedup_keys
+    )
+
+    files_hits: list[dict[str, Any]] = []
+    if len(facts_hits) < settings.rag_min_facts:
+        try:
+            files_raw = await qdrant_search(
+                vector,
+                client=client,
+                limit=files_limit or settings.rag_files_limit,
+                source_prefix="file:",
+            )
+        except Exception as exc:  # pragma: no cover - сеть/хранилище
+            logger.error("Files search failed: %s", exc)
+            files_raw = []
+        files_hits = _deduplicate_hits(
+            [_normalize_hit(item) for item in files_raw], seen=dedup_keys
+        )
+
+    try:
+        faq_hits = await search_faq(
+            pool, query=query, limit=faq_limit, min_similarity=faq_min_similarity
+        )
+    except Exception as exc:  # pragma: no cover - БД
+        logger.error("FAQ search failed: %s", exc)
+        faq_hits = []
+
+    hits_total = len(facts_hits) + len(files_hits) + len(faq_hits)
+    rag_latency_ms = int((time.perf_counter() - rag_started) * 1000)
+
+    return {
+        "facts_hits": facts_hits,
+        "files_hits": files_hits,
+        "faq_hits": faq_hits,
+        "hits_total": hits_total,
+        "rag_latency_ms": rag_latency_ms,
+        "embed_error": embed_error,
+    }
+
+
 async def search_hits_with_payload(
     query: str, *, client: QdrantClient
 ) -> dict[str, list[dict[str, Any]]]:
@@ -202,8 +333,10 @@ async def search_hits_with_payload(
 
 
 __all__ = [
+    "embed_texts",
     "embed_query",
     "qdrant_search",
     "retrieve_context",
+    "gather_rag_data",
     "search_hits_with_payload",
 ]

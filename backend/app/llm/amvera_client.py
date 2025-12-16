@@ -27,7 +27,7 @@ class AmveraLLMClient:
         self._api_url = (api_url or str(settings.amvera_api_url)).rstrip("/")
         self._model = model or settings.amvera_model
         self._inference_name = inference_name or settings.amvera_inference_name
-        self._timeout = timeout or settings.completion_timeout
+        self._timeout = timeout or settings.llm_timeout or settings.completion_timeout
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens
         http_timeout = httpx.Timeout(

@@ -35,12 +35,14 @@ class Settings(BaseSettings):
     llm_dry_run: bool = Field(False, alias="LLM_DRY_RUN")
     llm_temperature: float = Field(0.1, alias="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(350, alias="LLM_MAX_TOKENS")
+    llm_timeout: float = Field(20.0, alias="LLM_TIMEOUT")
 
     app_env: Literal["dev", "prod", "test"] = Field("dev", alias="APP_ENV")
     api_prefix: str = "/v1"
 
     request_timeout: float = 30.0
-    completion_timeout: float = 60.0
+    completion_timeout: float = Field(60.0, alias="COMPLETION_TIMEOUT")
+    embed_timeout: float = Field(5.0, alias="EMBED_TIMEOUT")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
 

@@ -7,12 +7,11 @@ import asyncpg
 from app.booking.service import BookingQuoteService
 from app.booking.slot_filling import SlotFiller, SlotState
 from app.core.config import get_settings
-from app.db.queries.faq import search_faq
 from app.llm.amvera_client import AmveraLLMClient
 from app.llm.prompts import FACTS_PROMPT
 from app.rag.context_builder import build_context
 from app.rag.qdrant_client import QdrantClient
-from app.rag.retriever import retrieve_context
+from app.rag.retriever import gather_rag_data
 
 
 class ConversationStateStore:
@@ -129,16 +128,21 @@ class ChatComposer:
 
     async def handle_general(self, text: str) -> dict[str, Any]:
         settings = get_settings()
-        rag_started = time.perf_counter()
-        faq_hits = await search_faq(self._pool, query=text, limit=3, min_similarity=0.35)
-
-        rag_hits = await retrieve_context(query=text, client=self._qdrant)
-        rag_latency_ms = int((time.perf_counter() - rag_started) * 1000)
+        rag_hits = await gather_rag_data(
+            query=text,
+            client=self._qdrant,
+            pool=self._pool,
+            facts_limit=settings.rag_facts_limit,
+            files_limit=settings.rag_files_limit,
+            faq_limit=3,
+            faq_min_similarity=0.35,
+        )
 
         raw_facts_hits = rag_hits.get("facts_hits", [])
         raw_files_hits = rag_hits.get("files_hits", [])
+        faq_hits = rag_hits.get("faq_hits", [])
 
-        hits_total = len(raw_facts_hits) + len(raw_files_hits) + len(faq_hits)
+        hits_total = rag_hits.get("hits_total", len(raw_facts_hits) + len(raw_files_hits) + len(faq_hits))
 
         max_snippets = max(1, settings.rag_max_snippets)
         facts_hits = raw_facts_hits[:max_snippets]
@@ -164,7 +168,9 @@ class ChatComposer:
             "guard_triggered": False,
             "llm_called": False,
         }
-        debug["rag_latency_ms"] = rag_latency_ms
+        debug["rag_latency_ms"] = rag_hits.get("rag_latency_ms", 0)
+        if rag_hits.get("embed_error"):
+            debug["embed_error"] = rag_hits["embed_error"]
 
         if hits_total < settings.rag_min_facts:
             debug["guard_triggered"] = True

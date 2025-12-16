@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI
 
-from app.api.v1 import admin, chat, facts, rag_search
+from app.api.v1 import admin, chat, facts, knowledge, rag_search
 from app.booking.service import BookingQuoteService
 from app.booking.shelter_client import ShelterCloudService
 from app.booking.slot_filling import SlotFiller
@@ -54,6 +54,7 @@ def create_app() -> FastAPI:
 
     app.include_router(chat.router, prefix=api_prefix)
     app.include_router(facts.router, prefix=api_prefix)
+    app.include_router(knowledge.router, prefix=api_prefix)
     app.include_router(rag_search.router, prefix=api_prefix)
     app.include_router(admin.router, prefix=api_prefix)
     return app
