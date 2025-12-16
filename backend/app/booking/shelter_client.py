@@ -146,24 +146,12 @@ class ShelterCloudService:
     ) -> BookingQuote | None:
         if not isinstance(rate, dict):
             return None
-        price_info = rate.get("total") or rate.get("price") or {}
-        amount = price_info.get("amount") or price_info.get("value")
-        try:
-            price_value = float(amount)
-        except (TypeError, ValueError):
+
+        price_value, currency = self._extract_price(rate)
+        if price_value is None:
             return None
-        currency = str(price_info.get("currency") or "RUB").upper()
-        meal_plan = rate.get("mealPlan") or {}
-        breakfast = False
-        if isinstance(meal_plan, dict):
-            breakfast = bool(
-                meal_plan.get("breakfastIncluded")
-                or meal_plan.get("includesBreakfast")
-            )
-        else:
-            breakfast = bool(
-                rate.get("breakfastIncluded") or rate.get("includesBreakfast")
-            )
+
+        breakfast = self._is_breakfast_included(rate)
 
         return BookingQuote(
             room_name=room_name,
@@ -212,19 +200,9 @@ class ShelterCloudService:
                 or "Номер"
             ).strip()
             room_area = (category or {}).get("roomArea")
-            price_value: float | None = None
-            for key in ("price", "priceRub", "priceWithoutDiscount"):
-                amount = variant.get(key)
-                if amount is None:
-                    continue
-                try:
-                    price_value = float(amount)
-                    break
-                except (TypeError, ValueError):
-                    continue
+            price_value, currency = self._extract_variant_price(variant)
             if price_value is None:
                 continue
-            currency = str(variant.get("currency") or "RUB").upper()
 
             rooms.append(
                 {
@@ -256,6 +234,50 @@ class ShelterCloudService:
             return int(text)
         except ValueError:
             return text
+
+    @staticmethod
+    def _extract_price(rate: dict[str, Any]) -> tuple[float | None, str]:
+        price_info = rate.get("total") or rate.get("price") or {}
+        if not isinstance(price_info, dict):
+            return None, "RUB"
+
+        amount = price_info.get("amount") or price_info.get("value")
+        price_value = ShelterCloudService._to_float(amount)
+        if price_value is None:
+            return None, "RUB"
+
+        currency = str(price_info.get("currency") or "RUB").upper()
+        return price_value, currency
+
+    @staticmethod
+    def _is_breakfast_included(rate: dict[str, Any]) -> bool:
+        meal_plan = rate.get("mealPlan") or {}
+        if isinstance(meal_plan, dict):
+            return bool(
+                meal_plan.get("breakfastIncluded")
+                or meal_plan.get("includesBreakfast")
+            )
+        return bool(rate.get("breakfastIncluded") or rate.get("includesBreakfast"))
+
+    @staticmethod
+    def _extract_variant_price(variant: dict[str, Any]) -> tuple[float | None, str]:
+        price_value: float | None = None
+        for key in ("price", "priceRub", "priceWithoutDiscount"):
+            price_value = ShelterCloudService._to_float(variant.get(key))
+            if price_value is not None:
+                break
+        if price_value is None:
+            return None, "RUB"
+
+        currency = str(variant.get("currency") or "RUB").upper()
+        return price_value, currency
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
 
 __all__ = [
