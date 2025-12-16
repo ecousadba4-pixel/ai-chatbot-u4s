@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(350, alias="LLM_MAX_TOKENS")
     llm_timeout: float = Field(20.0, alias="LLM_TIMEOUT")
 
+    max_options: int = Field(6, alias="MAX_OPTIONS")
+
     app_env: Literal["dev", "prod", "test"] = Field("dev", alias="APP_ENV")
     api_prefix: str = "/v1"
 

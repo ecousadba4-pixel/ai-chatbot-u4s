@@ -7,8 +7,8 @@ import asyncpg
 from app.booking.entities import BookingEntities
 from app.booking.models import Guests
 from app.booking.service import BookingQuoteService
+from app.chat.formatting import format_shelter_quote
 from app.booking.slot_filling import SlotFiller, SlotState
-from app.core.config import get_settings
 from app.llm.amvera_client import AmveraLLMClient
 from app.llm.prompts import FACTS_PROMPT
 from app.rag.context_builder import build_context
@@ -111,20 +111,9 @@ class ChatComposer:
                 "debug": debug,
             }
 
-        lines = []
-        for offer in offers:
-            line = f"{offer.room_name}: {offer.total_price:.0f} {offer.currency}"
-            if offer.breakfast_included:
-                line += " (завтрак включён)"
-            if offer.room_area:
-                line += f", площадь {offer.room_area} м²"
-            lines.append(line)
+        answer = format_shelter_quote(entities, offers)
 
-        if entities.nights:
-            lines.append(f"Всего ночей: {entities.nights}")
-        lines.append("Нужно оформить бронирование?")
-
-        return {"answer": "\n".join(lines), "debug": debug}
+        return {"answer": answer, "debug": debug}
 
     async def handle_booking(self, session_id: str, text: str) -> dict[str, Any]:
         state = self._store.get(session_id) or SlotState()
