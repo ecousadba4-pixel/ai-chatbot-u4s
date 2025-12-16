@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.core.security import verify_api_key
 from app.rag.qdrant_client import QdrantClient, get_qdrant_client
 from app.rag.retriever import embed_query, qdrant_search
+from app.session import SessionStore, get_session_store
 
 router = APIRouter(prefix="/diag", dependencies=[Depends(verify_api_key)])
 
@@ -16,6 +17,10 @@ router = APIRouter(prefix="/diag", dependencies=[Depends(verify_api_key)])
 class QdrantSample(BaseModel):
     scroll_samples: list[dict[str, Any]]
     search_samples: list[dict[str, Any]]
+
+
+class RedisStatus(BaseModel):
+    ok: bool
 
 
 @router.get("/qdrant_sample", response_model=QdrantSample)
@@ -54,6 +59,12 @@ async def qdrant_sample(
             )
 
     return QdrantSample(scroll_samples=scroll_samples, search_samples=search_samples)
+
+
+@router.get("/redis", response_model=RedisStatus)
+async def redis_status(session_store: SessionStore = Depends(get_session_store)) -> RedisStatus:
+    ok = await session_store.ping()
+    return RedisStatus(ok=ok)
 
 
 __all__ = ["router"]

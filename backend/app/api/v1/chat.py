@@ -12,6 +12,7 @@ from app.chat.composer import ChatComposer
 from app.chat.intent import detect_intent
 from app.core.config import get_settings
 from app.core.security import verify_api_key
+from app.session import get_session_store
 
 router = APIRouter(prefix="/chat", dependencies=[Depends(verify_api_key)])
 
@@ -35,11 +36,23 @@ async def chat_endpoint(
     payload: ChatRequest, composer: ChatComposer = Depends(get_composer)
 ) -> ChatResponse:
     settings = get_settings()
+    session_store = get_session_store()
 
-    now_date = datetime.now(ZoneInfo("UTC")).date()
+    now = datetime.now(ZoneInfo("UTC"))
+    now_date = now.date()
     entities = extract_booking_entities_ru(payload.message, now_date=now_date, tz="UTC")
     session_id = payload.session_id or "anonymous"
     intent = detect_intent(payload.message, booking_entities=entities.__dict__)
+
+    if payload.session_id:
+        await session_store.get(payload.session_id)
+        await session_store.set(
+            payload.session_id,
+            {
+                "sessionId": payload.session_id,
+                "last_seen": now.isoformat(),
+            },
+        )
 
     if intent == "booking_quote":
         result = await composer.handle_booking(session_id, payload.message)
