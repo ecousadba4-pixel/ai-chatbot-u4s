@@ -10,6 +10,16 @@ BOOKING_PATTERNS = [
     r"дата (заезда|выезда)",
 ]
 
+BOOKING_CALC_PATTERNS = [
+    r"заезд",
+    r"выезд",
+    r"на \d+\s*(?:ноч|дн)",
+    r"ноч(и|ей)",
+    r"стоимость проживания",
+    r"брон",
+    r"забронировать",
+]
+
 KNOWLEDGE_PATTERNS = [
     r"поиск по базе",
     r"покажи .*баз[ае]",
@@ -50,9 +60,18 @@ def detect_intent(text: str, booking_entities: dict | None = None) -> str:
             "рассчитай",
             "посчитай",
             "тариф",
+            "стоимость проживания",
         ]
     )
-    if has_price_markers:
+    has_dates = any(
+        booking_entities.get(field)
+        for field in ("checkin", "checkout", "nights")
+    )
+    has_booking_calc_markers = any(
+        re.search(pattern, normalized) for pattern in BOOKING_CALC_PATTERNS
+    )
+
+    if has_price_markers or has_dates or has_booking_calc_markers:
         return "booking_calculation"
 
     for pattern in KNOWLEDGE_PATTERNS:

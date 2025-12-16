@@ -24,6 +24,7 @@ MONTHS = {
 
 DATE_ISO_RE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
 DATE_DOTTED_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b")
+DATE_DOTTED_SHORT_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?![./-]\d)")
 DATE_TEXT_RE = re.compile(
     r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s*(20\d{2})?",
     re.IGNORECASE,
@@ -54,18 +55,22 @@ AGE_RE = re.compile(r"(\d{1,2})\s*(?:лет|года|год)", re.IGNORECASE)
 class SlotState:
     check_in: str | None = None
     check_out: str | None = None
+    nights: int | None = None
     adults: int | None = None
     children: int | None = None
     children_ages: list[int] = field(default_factory=list)
+    room_type: str | None = None
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "check_in": self.check_in,
             "check_out": self.check_out,
+            "nights": self.nights,
             "adults": self.adults,
             "children": self.children,
             "children_ages": self.children_ages,
+            "room_type": self.room_type,
             "errors": self.errors,
         }
 
@@ -107,6 +112,12 @@ class SlotFiller:
             if state.children is None:
                 state.children = len(ages)
 
+        if state.nights is None:
+            state.nights = self._extract_nights(lowered)
+
+        if state.room_type is None:
+            state.room_type = self._extract_room_type(lowered)
+
         state.errors = self._validate_dates(state)
         return state
 
@@ -144,6 +155,7 @@ class SlotFiller:
         for regex, parser in (
             (DATE_ISO_RE, self._parse_iso_date),
             (DATE_DOTTED_RE, self._parse_dotted_date),
+            (DATE_DOTTED_SHORT_RE, self._parse_dotted_date),
             (DATE_TEXT_RE, self._parse_text_date),
         ):
             for match in regex.finditer(text):
@@ -168,7 +180,12 @@ class SlotFiller:
             return None
 
     def _parse_dotted_date(self, match: re.Match[str]) -> date | None:
-        day, month, year = match.groups()
+        groups = match.groups()
+        if len(groups) == 3:
+            day, month, year = groups
+        else:
+            day, month = groups
+            year = str(date.today().year)
         try:
             return datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d").date()
         except ValueError:
@@ -185,6 +202,31 @@ class SlotFiller:
             return date(year, month, int(day_raw))
         except ValueError:
             return None
+
+    def _extract_nights(self, text: str) -> int | None:
+        nights_match = re.search(
+            r"(?P<nights>\d+)\s*(?:ноч(?:и|ей)?|дн(?:я|ей)?)(?!\s*(?:назад|спустя))",
+            text,
+            re.IGNORECASE,
+        )
+        if nights_match:
+            try:
+                return int(nights_match.group("nights"))
+            except ValueError:
+                return None
+        return None
+
+    def _extract_room_type(self, text: str) -> str | None:
+        room_patterns = {
+            "студия": "Студия",
+            "шале комфорт": "Шале Комфорт",
+            "комфорт": "Шале Комфорт",
+            "шале": "Шале",
+        }
+        for key, value in room_patterns.items():
+            if key in text:
+                return value
+        return None
 
     def _extract_first_number(self, text: str, patterns: list[re.Pattern[str]]) -> int | None:
         for pattern in patterns:
