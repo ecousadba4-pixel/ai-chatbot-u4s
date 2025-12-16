@@ -1,5 +1,7 @@
 from typing import Any
 
+import time
+
 import asyncpg
 
 from app.booking.service import BookingQuoteService
@@ -127,12 +129,23 @@ class ChatComposer:
 
     async def handle_general(self, text: str) -> dict[str, Any]:
         settings = get_settings()
+        rag_started = time.perf_counter()
         faq_hits = await search_faq(self._pool, query=text, limit=3, min_similarity=0.35)
 
         rag_hits = await retrieve_context(query=text, client=self._qdrant)
+        rag_latency_ms = int((time.perf_counter() - rag_started) * 1000)
+
+        raw_facts_hits = rag_hits.get("facts_hits", [])
+        raw_files_hits = rag_hits.get("files_hits", [])
+
+        hits_total = len(raw_facts_hits) + len(raw_files_hits) + len(faq_hits)
+
+        max_snippets = max(1, settings.rag_max_snippets)
+        facts_hits = raw_facts_hits[:max_snippets]
+        files_hits = raw_files_hits[: max(0, max_snippets - len(facts_hits))]
         context_text = build_context(
-            facts_hits=rag_hits.get("facts_hits", []),
-            files_hits=rag_hits.get("files_hits", []),
+            facts_hits=facts_hits,
+            files_hits=files_hits,
             faq_hits=faq_hits,
         )
 
@@ -140,21 +153,51 @@ class ChatComposer:
         if context_text:
             system_prompt = f"{FACTS_PROMPT}\n\n{context_text}"
 
+        debug: dict[str, Any] = {
+            "intent": "general",
+            "context_length": len(context_text),
+            "facts_hits": len(facts_hits),
+            "files_hits": len(files_hits),
+            "faq_hits": len(faq_hits),
+            "rag_min_facts": settings.rag_min_facts,
+            "hits_total": hits_total,
+            "guard_triggered": False,
+            "llm_called": False,
+        }
+        debug["rag_latency_ms"] = rag_latency_ms
+
+        if hits_total < settings.rag_min_facts:
+            debug["guard_triggered"] = True
+            return {
+                "answer": (
+                    "Я не нашёл подтверждённой информации в базе знаний, поэтому не буду выдумывать. "
+                    "Уточните, пожалуйста: даты заезда и выезда, количество гостей, тип размещения или бюджет? "
+                    "Если вам нужна баня/сауна или дополнительные услуги — тоже сообщите. "
+                    "Если вы загрузили описание номеров/домиков в базу — скажите ‘покажи варианты из базы’."
+                ),
+                "debug": debug,
+            }
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ]
-        answer = await self._llm.chat(model=settings.amvera_model, messages=messages)
+
+        debug["llm_called"] = True
+        try:
+            llm_started = time.perf_counter()
+            answer = await self._llm.chat(model=settings.amvera_model, messages=messages)
+            debug["llm_latency_ms"] = int((time.perf_counter() - llm_started) * 1000)
+        except Exception as exc:  # noqa: BLE001
+            debug["llm_error"] = str(exc)
+            return {
+                "answer": "Сейчас не удалось получить ответ из LLM. Попробуйте уточнить запрос чуть позже.",
+                "debug": debug,
+            }
+
         return {
             "answer": answer or "Нет данных в базе знаний.",
-            "debug": {
-                "intent": "general",
-                "context_length": len(context_text),
-                "facts_hits": len(rag_hits.get("facts_hits", [])),
-                "files_hits": len(rag_hits.get("files_hits", [])),
-                "faq_hits": len(faq_hits),
-                "rag_min_facts": settings.rag_min_facts,
-            },
+            "debug": debug,
         }
 
 

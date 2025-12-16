@@ -48,7 +48,7 @@ def build_context(
     faq_hits: list[dict] | None = None,
 ) -> str:
     settings = get_settings()
-    max_chars = settings.rag_max_context_chars
+    max_chars = settings.rag_context_chars or settings.rag_max_context_chars
     lines: list[str] = []
 
     faq_lines = []

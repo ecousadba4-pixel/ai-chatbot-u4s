@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     )
     rag_facts_limit: int = Field(6, alias="RAG_FACTS_LIMIT")
     rag_files_limit: int = Field(4, alias="RAG_FILES_LIMIT")
-    rag_max_context_chars: int = Field(6000, alias="RAG_MAX_CONTEXT_CHARS")
+    rag_max_context_chars: int = Field(4000, alias="RAG_MAX_CONTEXT_CHARS")
+    rag_context_chars: int = Field(4000, alias="RAG_CONTEXT_CHARS")
+    rag_max_snippets: int = Field(8, alias="RAG_MAX_SNIPPETS")
     rag_min_facts: int = Field(4, alias="RAG_MIN_FACTS")
     amvera_api_token: str = Field(..., alias="AMVERA_API_TOKEN")
     amvera_api_url: AnyHttpUrl = Field(
@@ -31,6 +33,8 @@ class Settings(BaseSettings):
     shelter_cloud_token: str = Field(..., alias="SHELTER_CLOUD_TOKEN")
 
     llm_dry_run: bool = Field(False, alias="LLM_DRY_RUN")
+    llm_temperature: float = Field(0.1, alias="LLM_TEMPERATURE")
+    llm_max_tokens: int = Field(350, alias="LLM_MAX_TOKENS")
 
     app_env: Literal["dev", "prod", "test"] = Field("dev", alias="APP_ENV")
     api_prefix: str = "/v1"

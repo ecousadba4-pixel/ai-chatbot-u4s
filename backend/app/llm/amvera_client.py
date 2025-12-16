@@ -28,7 +28,15 @@ class AmveraLLMClient:
         self._model = model or settings.amvera_model
         self._inference_name = inference_name or settings.amvera_inference_name
         self._timeout = timeout or settings.completion_timeout
-        self._client = httpx.AsyncClient(timeout=self._timeout)
+        self._temperature = settings.llm_temperature
+        self._max_tokens = settings.llm_max_tokens
+        http_timeout = httpx.Timeout(
+            connect=settings.request_timeout,
+            read=self._timeout,
+            write=settings.request_timeout,
+            pool=settings.request_timeout,
+        )
+        self._client = httpx.AsyncClient(timeout=http_timeout)
         self._logger = logging.getLogger(__name__)
 
     async def close(self) -> None:
@@ -43,6 +51,8 @@ class AmveraLLMClient:
         payload = {
             "model": model or self._model,
             "messages": self._format_messages(messages),
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
         }
         url = f"{self._api_url}/models/{self._inference_name}"
 
