@@ -4,6 +4,7 @@ import time
 
 import asyncpg
 
+from app.core.config import Settings, get_settings
 from app.booking.entities import BookingEntities
 from app.booking.models import Guests
 from app.booking.service import BookingQuoteService
@@ -51,6 +52,7 @@ class ChatComposer:
         slot_filler: SlotFiller,
         booking_service: BookingQuoteService,
         store: ConversationStateStore,
+        settings: Settings | None = None,
     ) -> None:
         self._pool = pool
         self._qdrant = qdrant
@@ -58,6 +60,7 @@ class ChatComposer:
         self._slot_filler = slot_filler
         self._booking_service = booking_service
         self._store = store
+        self._settings = settings or get_settings()
 
     async def handle_booking_calculation(
         self, entities: BookingEntities
@@ -190,13 +193,12 @@ class ChatComposer:
         }
 
     async def handle_general(self, text: str, *, intent: str = "general") -> dict[str, Any]:
-        settings = get_settings()
         rag_hits = await gather_rag_data(
             query=text,
             client=self._qdrant,
             pool=self._pool,
-            facts_limit=settings.rag_facts_limit,
-            files_limit=settings.rag_files_limit,
+            facts_limit=self._settings.rag_facts_limit,
+            files_limit=self._settings.rag_files_limit,
             faq_limit=3,
             faq_min_similarity=0.35,
             intent=intent,
@@ -212,7 +214,7 @@ class ChatComposer:
 
         hits_total = rag_hits.get("hits_total", len(qdrant_hits) + len(faq_hits))
 
-        max_snippets = max(1, settings.rag_max_snippets)
+        max_snippets = max(1, self._settings.rag_max_snippets)
         facts_hits = qdrant_hits[:max_snippets]
         files_hits: list[dict[str, Any]] = []
         context_text = build_context(
@@ -232,7 +234,7 @@ class ChatComposer:
             "files_hits": len(files_hits),
             "qdrant_hits": len(qdrant_hits),
             "faq_hits": len(faq_hits),
-            "rag_min_facts": settings.rag_min_facts,
+            "rag_min_facts": self._settings.rag_min_facts,
             "hits_total": hits_total,
             "guard_triggered": False,
             "llm_called": False,
@@ -248,7 +250,7 @@ class ChatComposer:
         debug["boosting_applied"] = rag_hits.get("boosting_applied", False)
         debug["intent_detected"] = rag_hits.get("intent_detected") or intent
 
-        if hits_total < settings.rag_min_facts:
+        if hits_total < self._settings.rag_min_facts:
             debug["guard_triggered"] = True
             if intent == "lodging":
                 return {
@@ -276,7 +278,9 @@ class ChatComposer:
         debug["llm_called"] = True
         try:
             llm_started = time.perf_counter()
-            answer = await self._llm.chat(model=settings.amvera_model, messages=messages)
+            answer = await self._llm.chat(
+                model=self._settings.amvera_model, messages=messages
+            )
             debug["llm_latency_ms"] = int((time.perf_counter() - llm_started) * 1000)
         except Exception as exc:  # noqa: BLE001
             debug["llm_error"] = str(exc)
@@ -291,13 +295,12 @@ class ChatComposer:
         }
 
     async def handle_knowledge(self, text: str) -> dict[str, Any]:
-        settings = get_settings()
         rag_hits = await gather_rag_data(
             query=text,
             client=self._qdrant,
             pool=self._pool,
-            facts_limit=settings.rag_facts_limit,
-            files_limit=settings.rag_files_limit,
+            facts_limit=self._settings.rag_facts_limit,
+            files_limit=self._settings.rag_files_limit,
             faq_limit=3,
             faq_min_similarity=0.35,
             intent="knowledge_lookup",
@@ -335,7 +338,7 @@ class ChatComposer:
             }
 
         summary_lines = ["Нашёл в базе знаний:"]
-        for hit in qdrant_hits[: settings.rag_max_snippets]:
+        for hit in qdrant_hits[: self._settings.rag_max_snippets]:
             title = hit.get("title") or hit.get("source") or "Запись"
             text = (hit.get("text") or "").strip()
             if text:

@@ -43,6 +43,7 @@ def composer_dependency(pool=Depends(get_pool)) -> ChatComposer:
         slot_filler=slot_filler,
         booking_service=booking_service,
         store=state_store,
+        settings=settings,
     )
 
 
