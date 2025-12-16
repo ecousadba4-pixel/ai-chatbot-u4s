@@ -126,7 +126,7 @@ class ChatComposer:
             },
         }
 
-    async def handle_general(self, text: str) -> dict[str, Any]:
+    async def handle_general(self, text: str, *, intent: str = "general") -> dict[str, Any]:
         settings = get_settings()
         rag_hits = await gather_rag_data(
             query=text,
@@ -136,6 +136,7 @@ class ChatComposer:
             files_limit=settings.rag_files_limit,
             faq_limit=3,
             faq_min_similarity=0.35,
+            intent=intent,
         )
 
         qdrant_hits = rag_hits.get("qdrant_hits")
@@ -162,7 +163,7 @@ class ChatComposer:
             system_prompt = f"{FACTS_PROMPT}\n\n{context_text}"
 
         debug: dict[str, Any] = {
-            "intent": "general",
+            "intent": intent or "general",
             "context_length": len(context_text),
             "facts_hits": len(facts_hits),
             "files_hits": len(files_hits),
@@ -179,9 +180,21 @@ class ChatComposer:
             debug["embed_error"] = rag_hits["embed_error"]
         debug["raw_qdrant_hits"] = rag_hits.get("raw_qdrant_hits", [])
         debug["score_threshold_used"] = rag_hits.get("score_threshold_used")
+        debug["expanded_queries"] = rag_hits.get("expanded_queries", [])
+        debug["merged_hits_count"] = rag_hits.get("merged_hits_count", 0)
+        debug["boosting_applied"] = rag_hits.get("boosting_applied", False)
+        debug["intent_detected"] = rag_hits.get("intent_detected") or intent
 
         if hits_total < settings.rag_min_facts:
             debug["guard_triggered"] = True
+            if intent == "lodging":
+                return {
+                    "answer": (
+                        "Я не нашёл подтверждённой информации о домиках или номерах в базе знаний. "
+                        "Если загрузите файл или страницу с типами размещения, ценами и вместимостью, я смогу отвечать точнее."
+                    ),
+                    "debug": debug,
+                }
             return {
                 "answer": (
                     "Я не нашёл подтверждённой информации в базе знаний, поэтому не буду выдумывать. "
@@ -213,6 +226,63 @@ class ChatComposer:
             "answer": answer or "Нет данных в базе знаний.",
             "debug": debug,
         }
+
+    async def handle_knowledge(self, text: str) -> dict[str, Any]:
+        settings = get_settings()
+        rag_hits = await gather_rag_data(
+            query=text,
+            client=self._qdrant,
+            pool=self._pool,
+            facts_limit=settings.rag_facts_limit,
+            files_limit=settings.rag_files_limit,
+            faq_limit=3,
+            faq_min_similarity=0.35,
+            intent="knowledge_lookup",
+        )
+
+        qdrant_hits = rag_hits.get("qdrant_hits") or rag_hits.get("facts_hits", [])
+        faq_hits = rag_hits.get("faq_hits", [])
+        total_hits = len(qdrant_hits) + len(faq_hits)
+
+        debug: dict[str, Any] = {
+            "intent": "knowledge_lookup",
+            "hits_total": rag_hits.get("hits_total", total_hits),
+            "facts_hits": len(rag_hits.get("facts_hits", [])),
+            "files_hits": len(rag_hits.get("files_hits", [])),
+            "qdrant_hits": len(qdrant_hits),
+            "faq_hits": len(faq_hits),
+            "rag_latency_ms": rag_hits.get("rag_latency_ms", 0),
+            "embed_latency_ms": rag_hits.get("embed_latency_ms", 0),
+            "raw_qdrant_hits": rag_hits.get("raw_qdrant_hits", []),
+            "score_threshold_used": rag_hits.get("score_threshold_used"),
+            "expanded_queries": rag_hits.get("expanded_queries", []),
+            "merged_hits_count": rag_hits.get("merged_hits_count", 0),
+            "boosting_applied": rag_hits.get("boosting_applied", False),
+            "intent_detected": rag_hits.get("intent_detected", "knowledge_lookup"),
+        }
+        if rag_hits.get("embed_error"):
+            debug["embed_error"] = rag_hits["embed_error"]
+
+        if not total_hits:
+            return {
+                "answer": (
+                    "Я не нашёл подходящих фрагментов в базе знаний. Если загрузите файл или страницу с типами домиков/номеров, я буду отвечать точнее."
+                ),
+                "debug": debug,
+            }
+
+        summary_lines = ["Нашёл в базе знаний:"]
+        for hit in qdrant_hits[: settings.rag_max_snippets]:
+            title = hit.get("title") or hit.get("source") or "Запись"
+            text = (hit.get("text") or "").strip()
+            if text:
+                summary_lines.append(f"• {title}: {text[:180]}")
+        for faq in faq_hits[:2]:
+            question = faq.get("question") or "Вопрос"
+            answer = faq.get("answer") or ""
+            summary_lines.append(f"• FAQ {question}: {answer[:180]}")
+
+        return {"answer": "\n".join(summary_lines), "debug": debug}
 
 
 __all__ = [

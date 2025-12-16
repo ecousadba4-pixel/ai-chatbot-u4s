@@ -35,8 +35,10 @@ async def chat_endpoint(
 
     if intent == "booking_quote":
         result = await composer.handle_booking(session_id, payload.message)
+    elif intent == "knowledge_lookup":
+        result = await composer.handle_knowledge(payload.message)
     else:
-        result = await composer.handle_general(payload.message)
+        result = await composer.handle_general(payload.message, intent=intent)
 
     debug = result.get("debug", {})
     debug.setdefault("intent", intent)

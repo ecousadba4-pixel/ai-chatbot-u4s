@@ -45,6 +45,7 @@ async def knowledge_search(
         facts_limit=request.limit,
         files_limit=request.limit,
         faq_limit=min(5, request.limit),
+        intent="knowledge_lookup",
     )
 
     results: list[KnowledgeResult] = []
@@ -113,6 +114,10 @@ async def knowledge_search(
         "max_score": rag_hits.get("max_score"),
         "score_threshold_used": rag_hits.get("score_threshold_used"),
         "filtered_out_count": rag_hits.get("filtered_out_count", 0),
+        "expanded_queries": rag_hits.get("expanded_queries", []),
+        "boosting_applied": rag_hits.get("boosting_applied", False),
+        "intent_detected": rag_hits.get("intent_detected"),
+        "merged_hits_count": rag_hits.get("merged_hits_count", 0),
     }
     for raw_hit in rag_hits.get("raw_qdrant_hits", []):
         payload = raw_hit.get("payload")

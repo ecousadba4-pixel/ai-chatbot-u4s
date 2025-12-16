@@ -215,7 +215,9 @@ def _deduplicate_hits(
     for hit in hits:
         text = hit.get("text") or ""
         title = hit.get("title") or ""
-        key = f"{title}::{text[:80]}"
+        payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+        entity_id = payload.get("entity_id") or payload.get("id")
+        key = str(entity_id or f"{title}::{text[:80]}")
         if key in known:
             continue
         known.add(key)
@@ -273,13 +275,22 @@ async def gather_rag_data(
     files_limit: int | None = None,
     faq_limit: int = 3,
     faq_min_similarity: float = 0.35,
+    intent: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     rag_started = time.perf_counter()
 
-    embeddings, embed_error, embed_latency_ms = await embed_texts([query])
-    vector = embeddings[0] if embeddings else []
-    if not vector:
+    expanded_queries: list[str] = []
+    if intent == "lodging":
+        expanded_queries = [
+            f"{query} типы размещения номера домики коттеджи вместимость стоимость",
+            "категории проживания домики номера коттеджи",
+            "домики номера вместимость цена тариф",
+        ]
+
+    queries = [query, *expanded_queries]
+    embeddings, embed_error, embed_latency_ms = await embed_texts(queries)
+    if not embeddings:
         return {
             "facts_hits": [],
             "files_hits": [],
@@ -294,6 +305,10 @@ async def gather_rag_data(
             "max_score": None,
             "score_threshold_used": settings.rag_score_threshold,
             "filtered_out_count": 0,
+            "expanded_queries": expanded_queries,
+            "boosting_applied": False,
+            "intent_detected": intent,
+            "merged_hits_count": 0,
         }
 
     search_limit = max(
@@ -301,15 +316,20 @@ async def gather_rag_data(
         files_limit or settings.rag_files_limit,
     )
 
-    try:
-        qdrant_raw = await qdrant_search(
-            vector,
-            client=client,
-            limit=search_limit,
-        )
-    except Exception as exc:  # pragma: no cover - сеть/хранилище
-        logger.error("Qdrant search failed: %s", exc)
-        qdrant_raw = []
+    qdrant_raw: list[dict[str, Any]] = []
+    for vector in embeddings:
+        if not vector:
+            continue
+        try:
+            qdrant_raw.extend(
+                await qdrant_search(
+                    vector,
+                    client=client,
+                    limit=search_limit,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - сеть/хранилище
+            logger.error("Qdrant search failed: %s", exc)
 
     raw_scores = [
         float(item.get("score", 0.0) or 0.0)
@@ -321,6 +341,27 @@ async def gather_rag_data(
 
     normalized_hits = [_normalize_hit(item) for item in qdrant_raw]
     normalized_hits = _deduplicate_hits(normalized_hits)
+    merged_hits_count = len(normalized_hits)
+
+    boosting_applied = False
+    if intent == "lodging":
+        boosting_applied = True
+        boosted_hits: list[dict[str, Any]] = []
+        for hit in normalized_hits:
+            payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+            type_value = payload.get("type") or hit.get("type")
+            source = payload.get("source") or hit.get("source") or ""
+            multiplier = 1.0
+            if isinstance(type_value, str) and type_value in {"faq", "faq_ext"}:
+                multiplier *= 0.85
+            if isinstance(source, str) and source.startswith("knowledge/about"):
+                multiplier *= 1.05
+            if payload and isinstance(payload.get("subtype"), str):
+                if payload.get("subtype", "").startswith("about"):
+                    multiplier *= 1.05
+            boosted_hit = {**hit, "score": hit.get("score", 0.0) * multiplier}
+            boosted_hits.append(boosted_hit)
+        normalized_hits = boosted_hits
 
     threshold = settings.rag_score_threshold
     filtered_hits = [
@@ -354,6 +395,10 @@ async def gather_rag_data(
         "max_score": max_score,
         "score_threshold_used": threshold,
         "filtered_out_count": filtered_out_count,
+        "expanded_queries": expanded_queries,
+        "boosting_applied": boosting_applied,
+        "intent_detected": intent,
+        "merged_hits_count": merged_hits_count,
     }
 
 
