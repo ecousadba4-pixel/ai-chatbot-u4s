@@ -1,5 +1,25 @@
 (() => {
-  const DEFAULT_ENDPOINT = "https://u4s-ai-chatbot.fantom-api.ru/api/chat";
+  function resolveDefaultEndpoint() {
+    if (
+      typeof window !== "undefined" &&
+      typeof window.CHATBOT_API_BASE === "string" &&
+      window.CHATBOT_API_BASE.trim()
+    ) {
+      return window.CHATBOT_API_BASE.trim();
+    }
+
+    if (typeof window !== "undefined" && window.location && window.location.origin) {
+      return `${window.location.origin}/api/chat`;
+    }
+
+    if (typeof location !== "undefined" && location.origin) {
+      return `${location.origin}/api/chat`;
+    }
+
+    return "/api/chat";
+  }
+
+  const DEFAULT_ENDPOINT = resolveDefaultEndpoint();
   const STORAGE_KEY = "u4s_history_v1";
   const SESSION_KEY = "u4s_session_v1";
   const SIZE_EVENT = "u4s-iframe-size";
