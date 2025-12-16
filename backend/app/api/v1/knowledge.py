@@ -58,7 +58,15 @@ async def knowledge_search(
 
     for hit in qdrant_hits:
         hit_payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
-        content = hit_payload.get("text") or hit.get("text") or ""
+        content = hit_payload.get("text")
+        if not content:
+            for key in ("content", "chunk", "page_content", "body"):
+                value = hit_payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    content = value
+                    break
+        if not content:
+            content = hit.get("text") or ""
         title = hit_payload.get("title") or hit.get("title")
         source = hit_payload.get("source") or hit.get("source")
         if not title:
@@ -69,9 +77,9 @@ async def knowledge_search(
 
         results.append(
             KnowledgeResult(
-                type=(hit_payload.get("type") or hit.get("type") or "fact"),
+                type=hit_payload.get("type") or hit.get("type"),
                 title=title,
-                content=content,
+                content=content or "",
                 source=source,
                 score=float(hit.get("score", 0.0) or 0.0),
             )
@@ -88,7 +96,7 @@ async def knowledge_search(
             )
         )
 
-    results.sort(key=lambda item: (item.type != "faq", -item.score))
+    results.sort(key=lambda item: item.score, reverse=True)
     results = results[: request.limit]
 
     debug: dict[str, Any] = {
@@ -100,11 +108,17 @@ async def knowledge_search(
         "rag_latency_ms": rag_hits.get("rag_latency_ms", 0),
         "embed_latency_ms": rag_hits.get("embed_latency_ms", 0),
         "raw_qdrant_hits": rag_hits.get("raw_qdrant_hits", []),
+        "sample_payload_keys": None,
         "min_score": rag_hits.get("min_score"),
         "max_score": rag_hits.get("max_score"),
         "score_threshold_used": rag_hits.get("score_threshold_used"),
         "filtered_out_count": rag_hits.get("filtered_out_count", 0),
     }
+    for raw_hit in rag_hits.get("raw_qdrant_hits", []):
+        payload = raw_hit.get("payload")
+        if isinstance(payload, dict):
+            debug["sample_payload_keys"] = list(payload.keys())
+            break
     if rag_hits.get("embed_error"):
         debug["embed_error"] = rag_hits["embed_error"]
 

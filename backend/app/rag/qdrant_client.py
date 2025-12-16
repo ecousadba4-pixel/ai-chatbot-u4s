@@ -29,7 +29,11 @@ class QdrantClient:
         query_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         url = f"{self._base_url}/collections/{collection}/points/search"
-        payload: dict[str, Any] = {"vector": list(vector), "limit": limit}
+        payload: dict[str, Any] = {
+            "vector": list(vector),
+            "limit": limit,
+            "with_payload": True,
+        }
         if query_filter:
             payload["filter"] = query_filter
 

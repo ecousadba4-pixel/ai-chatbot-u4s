@@ -311,11 +311,16 @@ async def gather_rag_data(
         logger.error("Qdrant search failed: %s", exc)
         qdrant_raw = []
 
+    raw_scores = [
+        float(item.get("score", 0.0) or 0.0)
+        for item in qdrant_raw
+        if isinstance(item, dict)
+    ]
+    min_score = min(raw_scores) if raw_scores else None
+    max_score = max(raw_scores) if raw_scores else None
+
     normalized_hits = [_normalize_hit(item) for item in qdrant_raw]
     normalized_hits = _deduplicate_hits(normalized_hits)
-    scores = [hit.get("score", 0.0) for hit in normalized_hits]
-    min_score = min(scores) if scores else None
-    max_score = max(scores) if scores else None
 
     threshold = settings.rag_score_threshold
     filtered_hits = [
