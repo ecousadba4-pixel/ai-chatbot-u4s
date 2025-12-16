@@ -27,7 +27,7 @@ booking_service = BookingQuoteService(shelter_service)
 
 
 @asynccontextmanager
-def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI):
     async with lifespan_pool():
         yield
     await qdrant_client.close()
