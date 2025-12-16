@@ -284,6 +284,13 @@ class ChatComposer:
             debug["llm_latency_ms"] = int((time.perf_counter() - llm_started) * 1000)
         except Exception as exc:  # noqa: BLE001
             debug["llm_error"] = str(exc)
+            rag_answer = self._build_rag_only_answer(
+                qdrant_hits=qdrant_hits,
+                faq_hits=faq_hits,
+                rag_hits=rag_hits,
+            )
+            if rag_answer:
+                return {"answer": rag_answer, "debug": debug}
             return {
                 "answer": "Сейчас не удалось получить ответ из LLM. Попробуйте уточнить запрос чуть позже.",
                 "debug": debug,
@@ -293,6 +300,88 @@ class ChatComposer:
             "answer": answer or "Нет данных в базе знаний.",
             "debug": debug,
         }
+
+    def _build_rag_only_answer(
+        self,
+        *,
+        qdrant_hits: list[dict[str, Any]],
+        faq_hits: list[dict[str, Any]],
+        rag_hits: dict[str, Any],
+    ) -> str:
+        merged_hits_count = rag_hits.get("merged_hits_count")
+        hits_total = rag_hits.get("hits_total")
+        if merged_hits_count is None:
+            merged_hits_count = len(qdrant_hits)
+        if hits_total is None:
+            hits_total = len(qdrant_hits) + len(faq_hits)
+
+        if not (qdrant_hits or faq_hits):
+            return ""
+
+        if merged_hits_count < max(1, self._settings.rag_min_facts) and hits_total < 1:
+            return ""
+
+        candidates: list[tuple[int, float, str, str]] = []
+
+        for faq in faq_hits:
+            answer = (faq.get("answer") or "").strip()
+            question = (faq.get("question") or "").strip()
+            if not answer:
+                continue
+            text = answer
+            if question:
+                text = f"{question}: {answer}"
+            candidates.append((0, float(faq.get("similarity", 0.0) or 0.0), text, text))
+
+        for hit in qdrant_hits:
+            text = (hit.get("text") or "").strip()
+            if not text:
+                continue
+            title = (hit.get("title") or "").strip()
+            payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+            type_value = (hit.get("type") or payload.get("type") or "").strip()
+            source = (hit.get("source") or payload.get("source") or "").strip()
+
+            priority = 2
+            if type_value in {"faq", "faq_ext"}:
+                priority = 0
+            elif source.startswith("knowledge") or source.endswith(".md") or ".md" in source:
+                priority = 1
+
+            snippet = f"{title}: {text}" if title else text
+            candidates.append((priority, float(hit.get("score", 0.0) or 0.0), snippet, text))
+
+        if not candidates:
+            return ""
+
+        candidates.sort(key=lambda item: (item[0], -item[1]))
+        selected = candidates[:4]
+
+        answer_lines = [f"• {item[2]}" for item in selected if item[2]]
+
+        restriction_keywords = [
+            "только для проживающих",
+            "только для гостей",
+            "по предварительной записи",
+            "по предзаказу",
+            "предоплата",
+            "депозит",
+            "залог",
+            "по запросу",
+            "доступно по записи",
+        ]
+        important_notes: list[str] = []
+        for _, _, _, raw_text in selected:
+            lowered = raw_text.lower()
+            for keyword in restriction_keywords:
+                if keyword in lowered and keyword not in important_notes:
+                    important_notes.append(keyword)
+        if important_notes:
+            answer_lines.append("Важно:")
+            for note in important_notes[:2]:
+                answer_lines.append(f"• {note}")
+
+        return "\n".join(answer_lines)
 
     async def handle_knowledge(self, text: str) -> dict[str, Any]:
         rag_hits = await gather_rag_data(
