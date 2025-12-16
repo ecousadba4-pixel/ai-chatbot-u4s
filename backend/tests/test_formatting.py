@@ -35,6 +35,7 @@ def test_format_shelter_quote_renders_readable_blocks(monkeypatch):
         adults=2,
         children=1,
         nights=2,
+        room_type=None,
         missing_fields=[],
     )
     guests = Guests(adults=2, children=1)
@@ -87,6 +88,7 @@ def test_format_shelter_quote_respects_limit_and_currency(monkeypatch):
         adults=1,
         children=0,
         nights=None,
+        room_type=None,
         missing_fields=[],
     )
     guests = Guests(adults=1, children=0)

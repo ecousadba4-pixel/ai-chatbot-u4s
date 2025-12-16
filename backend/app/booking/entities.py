@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import re
 from zoneinfo import ZoneInfo
 
@@ -34,6 +34,7 @@ DATE_RANGE_NUMERIC_RE = re.compile(
 
 DATE_ISO_RE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
 DATE_DOTTED_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b")
+DATE_DOTTED_SHORT_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?![./-]\d)")
 DATE_TEXT_RE = re.compile(
     r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s*(20\d{2})?",
     re.IGNORECASE,
@@ -57,6 +58,7 @@ class BookingEntities:
     adults: int | None
     children: int | None
     nights: int | None
+    room_type: str | None
     missing_fields: list[str]
 
 
@@ -80,8 +82,18 @@ def _parse_iso(match: re.Match[str]) -> date | None:
         return None
 
 
-def _parse_dotted(match: re.Match[str]) -> date | None:
-    day, month, year = match.groups()
+def _parse_dotted(match: re.Match[str], *, current: date) -> date | None:
+    groups = match.groups()
+    if len(groups) == 3:
+        day, month, year = groups
+    else:
+        day, month = groups
+        year = None
+    if year is None:
+        try:
+            return _parse_yearless(int(day), int(month), current=current)
+        except ValueError:
+            return None
     try:
         return datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d").date()
     except ValueError:
@@ -155,14 +167,20 @@ def _extract_dates(text: str, *, current: date) -> list[date]:
                 return [checkin, checkout]
 
     matches: list[tuple[int, date]] = []
-    for regex, parser in (
-        (DATE_ISO_RE, _parse_iso),
-        (DATE_DOTTED_RE, _parse_dotted),
-    ):
-        for match in regex.finditer(text):
-            parsed = parser(match)
-            if parsed:
-                matches.append((match.start(), parsed))
+    for match in DATE_ISO_RE.finditer(text):
+        parsed = _parse_iso(match)
+        if parsed:
+            matches.append((match.start(), parsed))
+
+    for match in DATE_DOTTED_RE.finditer(text):
+        parsed = _parse_dotted(match, current=current)
+        if parsed:
+            matches.append((match.start(), parsed))
+
+    for match in DATE_DOTTED_SHORT_RE.finditer(text):
+        parsed = _parse_dotted(match, current=current)
+        if parsed:
+            matches.append((match.start(), parsed))
 
     for match in DATE_TEXT_RE.finditer(text):
         parsed = _parse_text(match, current=current)
@@ -178,6 +196,34 @@ def _extract_dates(text: str, *, current: date) -> list[date]:
             seen.add(iso)
             dates.append(parsed_date)
     return dates[:2]
+
+
+def _extract_nights(text: str) -> int | None:
+    nights_match = re.search(
+        r"(?P<nights>\d+)\s*(?:ноч(?:и|ей)?|дн(?:я|ей)?)(?!\s*(?:назад|спустя))",
+        text,
+        re.IGNORECASE,
+    )
+    if nights_match:
+        try:
+            return int(nights_match.group("nights"))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_room_type(text: str) -> str | None:
+    room_patterns = {
+        "студия": "Студия",
+        "шале комфорт": "Шале Комфорт",
+        "комфорт": "Шале Комфорт",
+        "шале": "Шале",
+    }
+    lowered = text.lower()
+    for key, value in room_patterns.items():
+        if key in lowered:
+            return value
+    return None
 
 
 def _extract_guests(text: str) -> tuple[int | None, int]:
@@ -229,8 +275,17 @@ def extract_booking_entities_ru(
 
     adults, children = _extract_guests(text.lower())
 
-    nights: int | None = None
-    if checkin and checkout:
+    nights = _extract_nights(text)
+    room_type = _extract_room_type(text)
+
+    if nights and checkin and not checkout:
+        try:
+            checkout_date = date.fromisoformat(checkin) + timedelta(days=nights)
+            checkout = checkout_date.isoformat()
+        except ValueError:
+            checkout = checkout
+
+    if checkin and checkout and nights is None:
         try:
             delta = date.fromisoformat(checkout) - date.fromisoformat(checkin)
             nights = delta.days if delta.days > 0 else None
@@ -240,12 +295,12 @@ def extract_booking_entities_ru(
     missing_fields: list[str] = []
     if not checkin:
         missing_fields.append("checkin")
-    if not checkout:
-        missing_fields.append("checkout")
+    if not checkout and not nights:
+        missing_fields.append("checkout_or_nights")
     if adults is None:
         missing_fields.append("adults")
-    if children is None:
-        missing_fields.append("children")
+    if room_type is None:
+        missing_fields.append("room_type")
 
     return BookingEntities(
         checkin=checkin,
@@ -253,6 +308,7 @@ def extract_booking_entities_ru(
         adults=adults,
         children=children,
         nights=nights,
+        room_type=room_type,
         missing_fields=missing_fields,
     )
 

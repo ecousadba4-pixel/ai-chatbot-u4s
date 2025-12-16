@@ -1,6 +1,7 @@
 from typing import Any
 
 import time
+from datetime import date, timedelta
 
 import asyncpg
 
@@ -77,13 +78,34 @@ class ChatComposer:
             state.check_in = entities.checkin
         if entities.checkout and not state.check_out:
             state.check_out = entities.checkout
+        if entities.nights and state.nights is None:
+            state.nights = entities.nights
         if entities.adults is not None and state.adults is None:
             state.adults = entities.adults
         if entities.children is not None and state.children is None:
             state.children = entities.children
+        if entities.room_type and state.room_type is None:
+            state.room_type = entities.room_type
+
+        if state.check_in and state.nights and not state.check_out:
+            try:
+                check_in_date = date.fromisoformat(state.check_in)
+                state.check_out = (check_in_date + timedelta(days=state.nights)).isoformat()
+            except ValueError:
+                state.check_out = None
+
+        if state.check_in and state.check_out and state.nights is None:
+            try:
+                delta = (
+                    date.fromisoformat(state.check_out)
+                    - date.fromisoformat(state.check_in)
+                ).days
+                state.nights = delta if delta > 0 else None
+            except ValueError:
+                state.nights = None
         state.errors = self._slot_filler._validate_dates(state)  # noqa: SLF001
 
-        missing = self._slot_filler.missing_slots(state)
+        missing = self._missing_booking_fields(state)
         self._store.set(session_id, state)
         debug: dict[str, Any] = {
             "intent": "booking_calculation",
@@ -95,9 +117,9 @@ class ChatComposer:
             "llm_called": False,
         }
 
-        next_slot = self._next_missing_slot(state)
-        if next_slot:
-            question = self._question_for_slot(next_slot, state)
+        ask_children = state.children is None
+        if missing:
+            question = self._build_booking_prompt(state, missing, ask_children)
             return {"answer": question, "debug": debug}
 
         guests = Guests(adults=state.adults or 0, children=state.children or 0)
@@ -134,30 +156,98 @@ class ChatComposer:
         entities.adults = state.adults
         entities.children = state.children
         entities.missing_fields = []
+        entities.room_type = state.room_type
+        entities.nights = state.nights
 
         answer = format_shelter_quote(entities, offers)
 
         return {"answer": answer, "debug": debug}
 
-    def _next_missing_slot(self, state: SlotState) -> str | None:
-        if not state.check_in or not state.check_out:
-            return "dates"
+    def _missing_booking_fields(self, state: SlotState) -> list[str]:
+        missing: list[str] = []
+        if not state.check_in:
+            missing.append("checkin")
+        if not state.check_out and not state.nights:
+            missing.append("checkout_or_nights")
         if state.adults is None:
-            return "adults"
-        if state.children is None:
-            return "children"
-        return None
+            missing.append("adults")
+        if state.room_type is None:
+            missing.append("room_type")
+        return missing
 
-    def _question_for_slot(self, slot: str, state: SlotState) -> str:
-        prompts = {
-            "dates": "На какие даты вы планируете заезд?",
-            "adults": "Сколько взрослых будет проживать?",
-            "children": "Будут ли дети до 12 лет?",
+    def _build_booking_prompt(
+        self, state: SlotState, missing: list[str], ask_children: bool
+    ) -> str:
+        summary = self._summary_line(state)
+        questions: list[str] = []
+
+        question_map = {
+            "checkin": "На какую дату планируете заезд?",
+            "checkout_or_nights": "Сколько ночей или до какого числа остаетесь?",
+            "adults": "Сколько будет взрослых?",
+            "room_type": "Какой тип размещения: Студия / Шале / Шале Комфорт?",
         }
-        question = prompts.get(slot, "Уточните детали бронирования, пожалуйста")
-        if state.errors:
-            return f"{' '.join(state.errors)} {question}".strip()
-        return question
+
+        for field in missing:
+            if field in question_map:
+                questions.append(question_map[field])
+            if len(questions) >= 3:
+                break
+
+        if ask_children:
+            questions.append("Будут ли дети (и возраст)?")
+
+        parts = ["Отлично, посчитаю 😊"]
+        if summary:
+            parts.append(summary)
+        if questions:
+            parts.append("Подскажите, пожалуйста:")
+            parts.extend(questions)
+        parts.append("Когда соберём данные, сразу покажу варианты. Оформляем бронирование?")
+        return "\n".join(parts)
+
+    def _summary_line(self, state: SlotState) -> str:
+        fragments: list[str] = []
+        if state.check_in:
+            fragments.append(f"Заезд: {self._format_date(state.check_in)}")
+        if state.nights:
+            fragments.append(f"ночей: {state.nights}")
+        elif state.check_out:
+            fragments.append(
+                f"выезд: {self._format_date(state.check_out)}"
+            )
+
+        if state.adults:
+            guests = f"гостей: {state.adults} взр."
+            if state.children:
+                guests += f", детей: {state.children}"
+            fragments.append(guests)
+
+        if state.room_type:
+            fragments.append(f"тип: {state.room_type}")
+
+        return ", ".join(fragments)
+
+    def _format_date(self, date_str: str) -> str:
+        try:
+            parsed = date.fromisoformat(date_str)
+        except ValueError:
+            return date_str
+        month_names = [
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        ]
+        return f"{parsed.day} {month_names[parsed.month - 1]}"
 
     def _apply_children_answer(self, text: str, state: SlotState) -> None:
         if state.children is not None:
