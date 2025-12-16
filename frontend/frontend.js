@@ -1,5 +1,5 @@
 (() => {
-  const DEFAULT_ENDPOINT = "https://ai-chatbot-u4s-karinausadba.amvera.io/api/chat";
+  const DEFAULT_ENDPOINT = "https://u4s-ai-chatbot.fantom-api.ru/api/chat";
   const STORAGE_KEY = "u4s_history_v1";
   const SESSION_KEY = "u4s_session_v1";
   const SIZE_EVENT = "u4s-iframe-size";
