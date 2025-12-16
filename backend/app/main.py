@@ -17,6 +17,7 @@ settings = get_settings()
 setup_logging()
 
 state_store = InMemoryConversationStateStore()
+booking_state_store = InMemoryConversationStateStore()
 slot_filler = SlotFiller()
 qdrant_client = get_qdrant_client()
 llm_client = AmveraLLMClient()
@@ -43,6 +44,7 @@ def composer_dependency(pool=Depends(get_pool)) -> ChatComposer:
         slot_filler=slot_filler,
         booking_service=booking_service,
         store=state_store,
+        booking_fsm_store=booking_state_store,
         settings=settings,
     )
 

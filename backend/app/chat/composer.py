@@ -8,6 +8,7 @@ import asyncpg
 
 from app.core.config import Settings, get_settings
 from app.booking.entities import BookingEntities
+from app.booking.fsm import BookingState, initial_booking_context
 from app.booking.models import Guests
 from app.booking.service import BookingQuoteService
 from app.chat.formatting import (
@@ -15,7 +16,7 @@ from app.chat.formatting import (
     format_shelter_quote,
     postprocess_answer,
 )
-from app.booking.slot_filling import SlotFiller, SlotState
+from app.booking.slot_filling import CHILDREN_PATTERNS, SlotFiller, SlotState
 from app.llm.amvera_client import AmveraLLMClient
 from app.llm.prompts import FACTS_PROMPT
 from app.rag.context_builder import build_context
@@ -61,7 +62,9 @@ class ChatComposer:
         slot_filler: SlotFiller,
         booking_service: BookingQuoteService,
         store: ConversationStateStore,
+        booking_fsm_store: ConversationStateStore | None = None,
         settings: Settings | None = None,
+        max_state_attempts: int = 3,
     ) -> None:
         self._pool = pool
         self._qdrant = qdrant
@@ -69,13 +72,19 @@ class ChatComposer:
         self._slot_filler = slot_filler
         self._booking_service = booking_service
         self._store = store
+        self._booking_store = booking_fsm_store or store
         self._settings = settings or get_settings()
+        self._max_state_attempts = max_state_attempts
 
     def has_active_booking(
         self, session_id: str, entities: BookingEntities | None = None
     ) -> bool:
+        booking_context = self._booking_store.get(session_id)
+        if self._booking_fsm_active(booking_context):
+            return True
+
         state = self._store.get(session_id)
-        if state and self._has_booking_context(state):
+        if isinstance(state, SlotState) and self._has_booking_context(state):
             return True
         if entities and self._entities_have_booking_data(entities):
             return True
@@ -84,134 +93,31 @@ class ChatComposer:
     async def handle_booking_calculation(
         self, session_id: str, text: str, entities: BookingEntities
     ) -> dict[str, Any]:
-        state = self._store.get(session_id) or SlotState()
-        state = self._slot_filler.extract(text, state)
-        self._apply_children_answer(text, state)
-
-        previously_prompted_adults = state.last_prompted_slot == "adults"
-        if state.adults is None and previously_prompted_adults:
-            guarded_adults = self._slot_filler._extract_adults(  # noqa: SLF001
-                text, allow_general_numbers=True
-            )
-            if guarded_adults is not None:
-                state.adults = guarded_adults
-                state.last_adults_extraction = guarded_adults
-
-        if entities.checkin and not state.check_in:
-            state.check_in = entities.checkin
-        if entities.checkout and not state.check_out:
-            state.check_out = entities.checkout
-        if entities.nights and state.nights is None:
-            state.nights = entities.nights
-        if entities.adults is not None and state.adults is None:
-            state.adults = entities.adults
-        if entities.children is not None and state.children is None:
-            state.children = entities.children
-        if entities.room_type and state.room_type is None:
-            state.room_type = entities.room_type
-
-        if state.check_in and state.nights and not state.check_out:
-            try:
-                check_in_date = date.fromisoformat(state.check_in)
-                state.check_out = (check_in_date + timedelta(days=state.nights)).isoformat()
-            except ValueError:
-                state.check_out = None
-
-        if state.check_in and state.check_out and state.nights is None:
-            try:
-                delta = (
-                    date.fromisoformat(state.check_out)
-                    - date.fromisoformat(state.check_in)
-                ).days
-                state.nights = delta if delta > 0 else None
-            except ValueError:
-                state.nights = None
-        state.errors = self._slot_filler._validate_dates(state)  # noqa: SLF001
-
-        missing = self._missing_booking_fields(state)
+        booking = self._ensure_booking_context(session_id)
         debug: dict[str, Any] = {
             "intent": "booking_calculation",
-            "booking_entities": entities.__dict__,
-            "missing_fields": missing,
+            "booking_state": str(getattr(booking.get("state"), "value", "")),
+            "booking_entities": dict(booking.get("entities", {})),
+            "missing_fields": self._missing_booking_state_fields(booking),
             "shelter_called": False,
             "shelter_latency_ms": 0,
             "shelter_error": None,
             "llm_called": False,
         }
 
-        logger.debug(
-            "Booking calculation input=%r adults_extracted=%s state=%s entities=%s",
-            text,
-            state.last_adults_extraction,
-            state.as_dict(),
-            entities.__dict__,
-        )
+        if self._should_reset_flow(text):
+            booking = initial_booking_context()
 
-        next_slot = self._next_booking_question(state)
-        if state.errors:
-            state.last_prompted_slot = next_slot or "checkin"
-            self._store.set(session_id, state)
-            question = self._build_booking_prompt(
-                state, next_slot or "checkin", prefix=state.errors[0]
-            )
-            return {"answer": question, "debug": debug}
+        if booking.get("state") == BookingState.CALCULATE:
+            answer = self._handle_calculate_confirmation(session_id, text, booking)
+            self._booking_store.set(session_id, booking)
+            debug["booking_state"] = booking["state"].value
+            return {"answer": answer, "debug": debug}
 
-        if next_slot:
-            prefix = None
-            if (
-                next_slot == "adults"
-                and previously_prompted_adults
-                and state.last_adults_extraction is None
-            ):
-                prefix = "Не совсем понял количество взрослых. Подскажите, пожалуйста, числом 🙂"
-
-            state.last_prompted_slot = next_slot
-            self._store.set(session_id, state)
-            question = self._build_booking_prompt(state, next_slot, prefix=prefix)
-            return {"answer": question, "debug": debug}
-
-        self._store.set(session_id, state)
-
-        guests = Guests(adults=state.adults or 0, children=state.children or 0)
-
-        started = time.perf_counter()
-        try:
-            offers = await self._booking_service.get_quotes(
-                check_in=state.check_in or "",
-                check_out=state.check_out or "",
-                guests=guests,
-            )
-            debug["shelter_called"] = True
-            debug["shelter_latency_ms"] = int(
-                (time.perf_counter() - started) * 1000
-            )
-        except Exception as exc:  # noqa: BLE001
-            debug["shelter_called"] = True
-            debug["shelter_error"] = str(exc)
-            return {
-                "answer": "Не получилось получить расчёт, уточните, пожалуйста, детали позже.",
-                "debug": debug,
-            }
-
-        self._store.clear(session_id)
-
-        if not offers:
-            return {
-                "answer": "К сожалению, не удалось найти доступные варианты на указанные даты.",
-                "debug": debug,
-            }
-
-        entities.checkin = state.check_in or entities.checkin
-        entities.checkout = state.check_out or entities.checkout
-        entities.adults = state.adults
-        entities.children = state.children
-        entities.missing_fields = []
-        entities.room_type = state.room_type
-        entities.nights = state.nights
-
-        answer = format_shelter_quote(entities, offers)
-
-        return {"answer": answer, "debug": debug}
+        response = await self._handle_booking_fsm(session_id, text, booking, debug)
+        debug["booking_state"] = booking["state"].value
+        debug["booking_entities"] = dict(booking.get("entities", {}))
+        return {"answer": response, "debug": debug}
 
     def _missing_booking_fields(self, state: SlotState) -> list[str]:
         missing: list[str] = []
@@ -246,6 +152,280 @@ class ChatComposer:
             or entities.adults is not None
             or entities.children is not None
         )
+
+    def _ensure_booking_context(self, session_id: str) -> dict[str, Any]:
+        context = self._booking_store.get(session_id)
+        if not self._booking_fsm_active(context):
+            context = initial_booking_context()
+            self._booking_store.set(session_id, context)
+        return context
+
+    def _booking_fsm_active(self, context: Any) -> bool:
+        return isinstance(context, dict) and isinstance(
+            context.get("state"), BookingState
+        )
+
+    def _should_reset_flow(self, text: str) -> bool:
+        normalized = text.strip().lower()
+        reset_triggers = {"начнём заново", "отмени", "другие даты", "с начала"}
+        return any(trigger in normalized for trigger in reset_triggers)
+
+    def _booking_prompt(self, question: str, booking: dict[str, Any], prefix: str | None = None) -> str:
+        summary = self._booking_summary(booking)
+        parts: list[str] = []
+        if summary:
+            parts.append(f"Понял: {summary}.")
+        if prefix:
+            parts.append(prefix)
+        parts.append(question)
+        return " ".join(parts)
+
+    def _booking_summary(self, booking: dict[str, Any]) -> str:
+        entities = booking.get("entities", {})
+        fragments: list[str] = []
+        checkin = entities.get("checkin")
+        if checkin:
+            fragments.append(f"заезд {self._format_date(checkin)}")
+        nights = entities.get("nights")
+        if nights:
+            fragments.append(f"ночей {nights}")
+        adults = entities.get("adults")
+        children = entities.get("children")
+        if adults is not None:
+            guests = f"взрослых {adults}"
+            if children is not None:
+                guests += f", детей {children}"
+            fragments.append(guests)
+        room_type = entities.get("room_type")
+        if room_type:
+            fragments.append(f"тип {room_type}")
+        return ", ".join(fragments)
+
+    def _reset_attempts(self, booking: dict[str, Any], state: BookingState) -> None:
+        booking.setdefault("attempts", {})
+        booking["attempts"].pop(state.value, None)
+
+    def _increment_attempts(self, booking: dict[str, Any], state: BookingState) -> int:
+        attempts = booking.setdefault("attempts", {})
+        attempts[state.value] = attempts.get(state.value, 0) + 1
+        return attempts[state.value]
+
+    async def _handle_booking_fsm(
+        self,
+        session_id: str,
+        text: str,
+        booking: dict[str, Any],
+        debug: dict[str, Any],
+    ) -> str:
+        state: BookingState = booking["state"]
+        if state == BookingState.WAIT_CHECKIN:
+            extracted = self._slot_filler._extract_dates(text)  # noqa: SLF001
+            if extracted:
+                booking["entities"]["checkin"] = extracted[0]
+                booking["state"] = BookingState.WAIT_NIGHTS
+                self._reset_attempts(booking, state)
+                question = self._booking_prompt(
+                    "Сколько ночей планируете остаться?", booking
+                )
+                booking["last_question"] = question
+                self._booking_store.set(session_id, booking)
+                return question
+            question = self._booking_prompt(
+                "На какую дату планируете заезд?", booking
+            )
+            return self._repeat_or_reset(session_id, booking, question)
+
+        if state == BookingState.WAIT_NIGHTS:
+            nights = self._slot_filler._extract_nights(text)  # noqa: SLF001
+            if nights is None and text.strip().isdigit():
+                nights = int(text.strip())
+            if nights:
+                booking["entities"]["nights"] = nights
+                booking["state"] = BookingState.WAIT_ADULTS
+                self._reset_attempts(booking, state)
+                question = self._booking_prompt("Сколько взрослых едет?", booking)
+                booking["last_question"] = question
+                self._booking_store.set(session_id, booking)
+                return question
+            question = self._booking_prompt(
+                "Уточните, пожалуйста, на сколько ночей бронирование?", booking
+            )
+            return self._repeat_or_reset(session_id, booking, question)
+
+        if state == BookingState.WAIT_ADULTS:
+            adults = self._slot_filler._extract_adults(  # noqa: SLF001
+                text, allow_general_numbers=True
+            )
+            if adults is not None:
+                booking["entities"]["adults"] = adults
+                booking["state"] = BookingState.WAIT_CHILDREN
+                self._reset_attempts(booking, state)
+                question = self._booking_prompt("Будут ли дети?", booking)
+                booking["last_question"] = question
+                self._booking_store.set(session_id, booking)
+                return question
+            question = self._booking_prompt(
+                "Сколько взрослых едет?", booking, prefix="Ответьте числом"
+            )
+            return self._repeat_or_reset(session_id, booking, question)
+
+        if state == BookingState.WAIT_CHILDREN:
+            lowered = text.strip().lower()
+            negative_children = {"нет", "не будет", "без детей", "нет детей", "0"}
+            children = self._slot_filler._extract_first_number(  # noqa: SLF001
+                lowered, CHILDREN_PATTERNS
+            )
+            if lowered in negative_children:
+                children = 0
+            if children is not None:
+                booking["entities"]["children"] = children
+                next_state = (
+                    BookingState.WAIT_CHILDREN_AGES if children > 0 else BookingState.WAIT_ROOM_TYPE
+                )
+                booking["state"] = next_state
+                self._reset_attempts(booking, state)
+                if children == 0:
+                    booking["entities"].setdefault("room_type", "Студия")
+                    booking["state"] = BookingState.CALCULATE
+                    booking["last_question"] = "Оформляем бронирование?"
+                    self._booking_store.set(session_id, booking)
+                    return await self._calculate_booking(session_id, booking, debug)
+
+                question_text = "Уточните возраст детей (через запятую)."
+                question = self._booking_prompt(question_text, booking)
+                booking["last_question"] = question
+                self._booking_store.set(session_id, booking)
+                return question
+            question = self._booking_prompt("Будут ли дети?", booking)
+            return self._repeat_or_reset(session_id, booking, question)
+
+        if state == BookingState.WAIT_CHILDREN_AGES:
+            ages = self._slot_filler._extract_children_ages(text)  # noqa: SLF001
+            if ages:
+                booking["entities"]["children_ages"] = ages
+                booking["state"] = BookingState.WAIT_ROOM_TYPE
+                self._reset_attempts(booking, state)
+                question = self._booking_prompt(
+                    "Какой тип размещения предпочитаете: Студия, Шале, Шале Комфорт или Семейный номер?",
+                    booking,
+                )
+                booking["last_question"] = question
+                self._booking_store.set(session_id, booking)
+                return question
+            question = self._booking_prompt(
+                "Не услышал возраст детей, укажите числа через запятую.", booking
+            )
+            return self._repeat_or_reset(session_id, booking, question)
+
+        if state == BookingState.WAIT_ROOM_TYPE:
+            room_type = self._slot_filler._extract_room_type(text)  # noqa: SLF001
+            if room_type:
+                booking["entities"]["room_type"] = room_type
+                booking["state"] = BookingState.CALCULATE
+                self._reset_attempts(booking, state)
+                answer = await self._calculate_booking(session_id, booking, debug)
+                return answer
+            question = self._booking_prompt(
+                "Выберите тип размещения: Студия, Шале, Шале Комфорт или Семейный номер.",
+                booking,
+            )
+            return self._repeat_or_reset(session_id, booking, question)
+
+        # Default fallback for any unexpected state
+        booking["state"] = BookingState.WAIT_CHECKIN
+        self._booking_store.set(session_id, booking)
+        return "На какую дату планируете заезд?"
+
+    def _repeat_or_reset(
+        self, session_id: str, booking: dict[str, Any], question: str
+    ) -> str:
+        attempts = self._increment_attempts(booking, booking["state"])
+        if attempts >= self._max_state_attempts:
+            booking.clear()
+            booking.update(initial_booking_context())
+            question = "Давайте начнём заново. На какую дату планируете заезд?"
+        booking["last_question"] = question
+        self._booking_store.set(session_id, booking)
+        return question
+
+    def _missing_booking_state_fields(self, booking: dict[str, Any]) -> list[str]:
+        entities = booking.get("entities", {})
+        missing = [key for key, value in entities.items() if value in (None, [])]
+        return missing
+
+    def _handle_calculate_confirmation(
+        self, session_id: str, text: str, booking: dict[str, Any]
+    ) -> str:
+        normalized = text.strip().lower()
+        if any(token in normalized for token in {"да", "оформляй", "подтверждаю"}):
+            booking["state"] = BookingState.DONE
+            return "Отлично, фиксирую бронирование. Если захотите изменить детали, скажите \"начнём заново\"."
+
+        if any(token in normalized for token in {"нет", "пока"}):
+            return "Хорошо, расчёт сохранён. Если нужно изменить даты, напишите \"начнём заново\"."
+
+        question = booking.get("last_question") or "Оформляем бронирование?"
+        return self._repeat_or_reset(session_id, booking, question)
+
+    async def _calculate_booking(
+        self, session_id: str, booking: dict[str, Any], debug: dict[str, Any]
+    ) -> str:
+        entities = booking["entities"]
+        checkin = entities.get("checkin")
+        nights = entities.get("nights")
+        adults = entities.get("adults")
+        children = entities.get("children") or 0
+
+        checkout: str | None = None
+        if checkin and nights:
+            try:
+                checkin_date = date.fromisoformat(checkin)
+                checkout = (checkin_date + timedelta(days=int(nights))).isoformat()
+            except ValueError:
+                checkout = None
+
+        guests = Guests(adults=adults or 0, children=children)
+
+        if not (checkin and checkout and adults is not None):
+            booking["state"] = BookingState.WAIT_CHECKIN
+            self._booking_store.set(session_id, booking)
+            return "Не удалось собрать данные для расчёта. На какую дату планируете заезд?"
+
+        started = time.perf_counter()
+        try:
+            offers = await self._booking_service.get_quotes(
+                check_in=checkin,
+                check_out=checkout,
+                guests=guests,
+            )
+            debug["shelter_called"] = True
+            debug["shelter_latency_ms"] = int((time.perf_counter() - started) * 1000)
+        except Exception as exc:  # noqa: BLE001
+            debug["shelter_called"] = True
+            debug["shelter_error"] = str(exc)
+            booking["state"] = BookingState.WAIT_CHECKIN
+            self._booking_store.set(session_id, booking)
+            return "Не получилось получить расчёт, давайте попробуем ещё раз. На какую дату планируете заезд?"
+
+        if not offers:
+            booking["state"] = BookingState.DONE
+            self._booking_store.set(session_id, booking)
+            return "К сожалению, нет доступных вариантов на выбранные даты. Если хотите изменить параметры, скажите \"начнём заново\"."
+
+        booking_entities = BookingEntities(
+            checkin=checkin,
+            checkout=checkout,
+            adults=adults,
+            children=children,
+            nights=nights,
+            room_type=entities.get("room_type"),
+            missing_fields=[],
+        )
+        price_block = format_shelter_quote(booking_entities, offers)
+        cta = "Оформляем бронирование?"
+        booking["last_question"] = cta
+        self._booking_store.set(session_id, booking)
+        return f"{price_block}\n\n{cta}"
 
     def _next_booking_question(self, state: SlotState) -> str | None:
         if not state.check_in:
