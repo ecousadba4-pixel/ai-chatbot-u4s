@@ -71,14 +71,27 @@ class AmveraLLMClient:
                     if content:
                         return content
                 except httpx.HTTPStatusError as exc:  # type: ignore[misc]
+                    response = exc.response
+                    status_code = response.status_code if response else "unknown"
+                    request_id = None
+                    body_preview = ""
+                    if response:
+                        headers = response.headers
+                        request_id = headers.get("x-kong-request-id") or headers.get("x-request-id")
+                        body_text = response.text
+                        if len(body_text) > 300:
+                            body_preview = body_text[:300] + "..."
+                        else:
+                            body_preview = body_text
                     self._logger.error(
-                        "Amvera request failed: status=%s, body=%s",
-                        exc.response.status_code if exc.response else "unknown",
-                        exc.response.text if exc.response else "",
+                        "Amvera request failed: status=%s, request_id=%s, body=%s",
+                        status_code,
+                        request_id,
+                        body_preview,
                     )
                     raise HTTPException(
                         status_code=502,
-                        detail=f"LLM provider error: HTTP {exc.response.status_code if exc.response else 'unknown'}",
+                        detail=f"LLM provider error: HTTP {status_code}",
                     ) from exc
                 except httpx.HTTPError as exc:
                     self._logger.error("Amvera request failed: %s", exc)
@@ -91,18 +104,37 @@ class AmveraLLMClient:
     @staticmethod
     def _extract_text(data: dict[str, Any]) -> str:
         if not isinstance(data, dict):
-            return ""
+            raise ValueError("Response payload is not an object")
+
         choices = data.get("choices")
-        if isinstance(choices, list):
-            for choice in choices:
-                if not isinstance(choice, dict):
-                    continue
-                message = choice.get("message")
-                if isinstance(message, dict):
-                    content = message.get("content") or message.get("text")
-                    if isinstance(content, str):
-                        return content.strip()
-        return ""
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Response payload missing choices list")
+
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+
+            message = choice.get("message")
+            if isinstance(message, dict):
+                content = message.get("content") or message.get("text")
+                if isinstance(content, str):
+                    return content.strip()
+
+            direct_text = choice.get("text")
+            if isinstance(direct_text, str):
+                return direct_text.strip()
+
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                delta_content = delta.get("content") or delta.get("text")
+                if isinstance(delta_content, str):
+                    return delta_content.strip()
+
+            content = choice.get("content")
+            if isinstance(content, str):
+                return content.strip()
+
+        raise ValueError("Unexpected response format: choices without textual content")
 
     @staticmethod
     def _format_messages(messages: Sequence[dict[str, str]]) -> list[dict[str, str]]:
