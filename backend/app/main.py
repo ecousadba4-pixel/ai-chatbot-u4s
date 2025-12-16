@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-
 from fastapi import Depends, FastAPI
 
 from app.api.v1 import admin, chat, facts, rag_search
@@ -11,7 +9,7 @@ from app.booking.slot_filling import SlotFiller
 from app.chat.composer import ChatComposer, InMemoryConversationStateStore
 from app.core.config import get_settings
 from app.core.logging import setup_logging
-from app.db.pool import get_pool, lifespan_pool
+from app.db.pool import get_pool
 from app.llm.amvera_client import AmveraLLMClient
 from app.rag.qdrant_client import QdrantClient, get_qdrant_client
 
@@ -26,13 +24,15 @@ shelter_service = ShelterCloudService()
 booking_service = BookingQuoteService(shelter_service)
 
 
-@asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with lifespan_pool():
+    pool = await get_pool()
+    try:
         yield
-    await qdrant_client.close()
-    await llm_client.close()
-    await shelter_service.close()
+    finally:
+        await pool.close()
+        await qdrant_client.close()
+        await llm_client.close()
+        await shelter_service.close()
 
 
 def composer_dependency(pool=Depends(get_pool)) -> ChatComposer:
