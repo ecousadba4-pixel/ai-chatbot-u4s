@@ -67,6 +67,16 @@ class ChatComposer:
         self._store = store
         self._settings = settings or get_settings()
 
+    def has_active_booking(
+        self, session_id: str, entities: BookingEntities | None = None
+    ) -> bool:
+        state = self._store.get(session_id)
+        if state and self._has_booking_context(state):
+            return True
+        if entities and self._entities_have_booking_data(entities):
+            return True
+        return False
+
     async def handle_booking_calculation(
         self, session_id: str, text: str, entities: BookingEntities
     ) -> dict[str, Any]:
@@ -117,9 +127,15 @@ class ChatComposer:
             "llm_called": False,
         }
 
-        ask_children = state.children is None
-        if missing:
-            question = self._build_booking_prompt(state, missing, ask_children)
+        next_slot = self._next_booking_question(state)
+        if state.errors:
+            question = self._build_booking_prompt(
+                state, next_slot or "checkin", prefix=state.errors[0]
+            )
+            return {"answer": question, "debug": debug}
+
+        if next_slot:
+            question = self._build_booking_prompt(state, next_slot)
             return {"answer": question, "debug": debug}
 
         guests = Guests(adults=state.adults or 0, children=state.children or 0)
@@ -171,62 +187,88 @@ class ChatComposer:
             missing.append("checkout_or_nights")
         if state.adults is None:
             missing.append("adults")
+        if state.children is None:
+            missing.append("children")
+        if (state.children or 0) > 0 and not state.children_ages:
+            missing.append("children_ages")
         if state.room_type is None:
             missing.append("room_type")
         return missing
 
+    def _has_booking_context(self, state: SlotState) -> bool:
+        return bool(
+            state.check_in
+            or state.check_out
+            or state.nights is not None
+            or state.adults is not None
+            or state.children is not None
+        )
+
+    def _entities_have_booking_data(self, entities: BookingEntities) -> bool:
+        return bool(
+            entities.checkin
+            or entities.checkout
+            or entities.nights
+            or entities.adults is not None
+            or entities.children is not None
+        )
+
+    def _next_booking_question(self, state: SlotState) -> str | None:
+        if not state.check_in:
+            return "checkin"
+        if state.nights is None and not state.check_out:
+            return "checkout_or_nights"
+        if state.adults is None:
+            return "adults"
+        if state.children is None:
+            return "children"
+        if state.children > 0 and not state.children_ages:
+            return "children_ages"
+        if state.room_type is None:
+            return "room_type"
+        return None
+
     def _build_booking_prompt(
-        self, state: SlotState, missing: list[str], ask_children: bool
+        self, state: SlotState, slot: str, prefix: str | None = None
     ) -> str:
         summary = self._summary_line(state)
-        questions: list[str] = []
-
         question_map = {
             "checkin": "На какую дату планируете заезд?",
-            "checkout_or_nights": "Сколько ночей или до какого числа остаетесь?",
-            "adults": "Сколько будет взрослых?",
-            "room_type": "Какой тип размещения: Студия / Шале / Шале Комфорт?",
+            "checkout_or_nights": "Сколько ночей остаётесь или до какого числа?",
+            "adults": "Сколько взрослых едет?",
+            "children": "Будут дети?",
+            "children_ages": "Уточните возраст детей (через запятую).",
+            "room_type": "Какой тип размещения выбрать: Студия, Шале, Шале Комфорт или Семейный номер?",
         }
 
-        for field in missing:
-            if field in question_map:
-                questions.append(question_map[field])
-            if len(questions) >= 3:
-                break
-
-        if ask_children:
-            questions.append("Будут ли дети (и возраст)?")
-
-        parts = ["Отлично, посчитаю 😊"]
+        prompt = question_map.get(slot, "Подскажите детали бронирования, пожалуйста.")
+        parts: list[str] = []
         if summary:
-            parts.append(summary)
-        if questions:
-            parts.append("Подскажите, пожалуйста:")
-            parts.extend(questions)
-        parts.append("Когда соберём данные, сразу покажу варианты. Оформляем бронирование?")
-        return "\n".join(parts)
+            parts.append(f"Понял: {summary}.")
+        if prefix:
+            parts.append(prefix)
+        parts.append(prompt)
+        return " ".join(parts).strip()
 
-    def _summary_line(self, state: SlotState) -> str:
+    def _summary_line(self, state: SlotState, limit: int = 3) -> str:
         fragments: list[str] = []
         if state.check_in:
-            fragments.append(f"Заезд: {self._format_date(state.check_in)}")
+            fragments.append(f"заезд {self._format_date(state.check_in)}")
         if state.nights:
-            fragments.append(f"ночей: {state.nights}")
+            fragments.append(f"ночей {state.nights}")
         elif state.check_out:
-            fragments.append(
-                f"выезд: {self._format_date(state.check_out)}"
-            )
+            fragments.append(f"выезд {self._format_date(state.check_out)}")
 
-        if state.adults:
-            guests = f"гостей: {state.adults} взр."
-            if state.children:
-                guests += f", детей: {state.children}"
+        if state.adults is not None:
+            guests = f"взрослых {state.adults}"
+            if state.children is not None:
+                guests += f", детей {state.children}"
             fragments.append(guests)
 
         if state.room_type:
-            fragments.append(f"тип: {state.room_type}")
+            fragments.append(f"тип {state.room_type}")
 
-        return ", ".join(fragments)
+        return ", ".join(fragments[:limit])
 
     def _format_date(self, date_str: str) -> str:
         try:
@@ -256,6 +298,26 @@ class ChatComposer:
         negative_children = {"нет", "неа", "нету", "не будет", "без детей"}
         if lowered in negative_children or "нет детей" in lowered:
             state.children = 0
+
+    def _next_missing_slot(self, state: SlotState) -> str | None:
+        for field in ("check_in", "check_out", "adults", "children"):
+            if getattr(state, field) in (None, ""):
+                return field
+        return None
+
+    def _question_for_slot(self, slot: str, state: SlotState) -> str:
+        summary = self._summary_line(state)
+        question_map = {
+            "check_in": "На какую дату заезд?",
+            "check_out": "До какого числа остаетесь?",
+            "adults": "Сколько будет взрослых?",
+            "children": "Будут дети?",
+        }
+        parts: list[str] = []
+        if summary:
+            parts.append(f"Понял: {summary}.")
+        parts.append(question_map.get(slot, "Уточните детали бронирования."))
+        return " ".join(parts)
 
     async def handle_booking(self, session_id: str, text: str) -> dict[str, Any]:
         state = self._store.get(session_id) or SlotState()
@@ -318,7 +380,6 @@ class ChatComposer:
             if offer.room_area:
                 line += f", площадь {offer.room_area} м²"
             summary_lines.append(line)
-        summary_lines.append("Оформить бронирование?")
 
         answer = "\n".join(summary_lines)
         return {
