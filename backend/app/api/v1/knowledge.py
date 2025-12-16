@@ -90,6 +90,7 @@ async def knowledge_search(
         "faq_hits": len(rag_hits.get("faq_hits", [])),
         "hits_total": rag_hits.get("hits_total", 0),
         "rag_latency_ms": rag_hits.get("rag_latency_ms", 0),
+        "embed_latency_ms": rag_hits.get("embed_latency_ms", 0),
     }
     if rag_hits.get("embed_error"):
         debug["embed_error"] = rag_hits["embed_error"]

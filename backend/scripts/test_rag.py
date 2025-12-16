@@ -12,7 +12,7 @@ from app.core.config import get_settings
 
 async def test_embeddings(client: httpx.AsyncClient, settings) -> None:
     try:
-        response = await client.post(str(settings.embed_url), json={"inputs": ["ping"]})
+        response = await client.post(str(settings.embed_url), json={"texts": ["ping"]})
         print("[embed] status:", response.status_code)
         print("[embed] body:", json.dumps(response.json(), ensure_ascii=False)[:500])
     except Exception as exc:  # noqa: BLE001

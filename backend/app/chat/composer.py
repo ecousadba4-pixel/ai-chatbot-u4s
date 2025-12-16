@@ -169,6 +169,7 @@ class ChatComposer:
             "llm_called": False,
         }
         debug["rag_latency_ms"] = rag_hits.get("rag_latency_ms", 0)
+        debug["embed_latency_ms"] = rag_hits.get("embed_latency_ms", 0)
         if rag_hits.get("embed_error"):
             debug["embed_error"] = rag_hits["embed_error"]
 

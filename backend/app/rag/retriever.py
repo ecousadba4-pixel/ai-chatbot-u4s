@@ -59,14 +59,15 @@ def _extract_embeddings(data: Any) -> list[list[float]]:
     return embeddings
 
 
-async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str | None]:
+async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str | None, int]:
     settings = get_settings()
 
     if not texts:
-        return [], None
+        return [], None, 0
 
+    started = time.perf_counter()
     timeout = httpx.Timeout(
-        connect=settings.embed_timeout,
+        connect=2.0,
         read=settings.embed_timeout,
         write=settings.embed_timeout,
         pool=settings.embed_timeout,
@@ -74,27 +75,71 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str | None]:
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(str(settings.embed_url), json={"inputs": texts})
+            response = await client.post(str(settings.embed_url), json={"texts": list(texts)})
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as exc:  # pragma: no cover - сетевые ошибки
+        latency_ms = int((time.perf_counter() - started) * 1000)
         logger.error("Embedding request failed: %s", exc, extra={"embed_error": str(exc)})
-        return [], str(exc)
+        return [], str(exc), latency_ms
     except ValueError as exc:  # pragma: no cover - невалидный JSON
+        latency_ms = int((time.perf_counter() - started) * 1000)
         logger.error("Failed to parse embedding response: %s", exc, extra={"embed_error": str(exc)})
-        return [], str(exc)
+        return [], str(exc), latency_ms
 
-    embeddings = _extract_embeddings(data)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+
+    embeddings: list[list[float]] = []
+    expected_dim: int | None = None
+    if isinstance(data, dict):
+        dim = data.get("dim")
+        if isinstance(dim, int) and dim > 0:
+            expected_dim = dim
+
+        vectors = data.get("vectors")
+        if isinstance(vectors, list):
+            for item in vectors:
+                vector = _normalize_vector(item)
+                if vector:
+                    embeddings.append(vector)
+
+            if expected_dim:
+                if any(len(vec) != expected_dim for vec in embeddings):
+                    logger.warning(
+                        "Embedding dimension mismatch", extra={"embed_error": "dim_mismatch"}
+                    )
+                    return [], "dim_mismatch", latency_ms
+                if expected_dim != 768:
+                    logger.warning(
+                        "Unexpected embedding dimension", extra={"embed_error": "unexpected_dim"}
+                    )
+                    return [], "unexpected_dim", latency_ms
+
+    if not embeddings:
+        embeddings = _extract_embeddings(data)
+
+    if expected_dim and embeddings:
+        if any(len(vec) != expected_dim for vec in embeddings):
+            logger.warning(
+                "Embedding dimension mismatch", extra={"embed_error": "dim_mismatch"}
+            )
+            return [], "dim_mismatch", latency_ms
+        if expected_dim != 768:
+            logger.warning(
+                "Unexpected embedding dimension", extra={"embed_error": "unexpected_dim"}
+            )
+            return [], "unexpected_dim", latency_ms
+
     if not embeddings:
         logger.warning("Embedding service returned empty embeddings", extra={"embed_error": "empty_embeddings"})
-        return [], "empty_embeddings"
-    return embeddings, None
+        return [], "empty_embeddings", latency_ms
+    return embeddings, None, latency_ms
 
 
 async def embed_query(text: str) -> list[float]:
     """Запрашивает embedding у внешнего сервиса."""
 
-    embeddings, _ = await embed_texts([text])
+    embeddings, _, _ = await embed_texts([text])
     return embeddings[0] if embeddings else []
 
 
@@ -232,7 +277,7 @@ async def gather_rag_data(
     settings = get_settings()
     rag_started = time.perf_counter()
 
-    embeddings, embed_error = await embed_texts([query])
+    embeddings, embed_error, embed_latency_ms = await embed_texts([query])
     vector = embeddings[0] if embeddings else []
     if not vector:
         return {
@@ -242,6 +287,7 @@ async def gather_rag_data(
             "hits_total": 0,
             "rag_latency_ms": int((time.perf_counter() - rag_started) * 1000),
             "embed_error": embed_error,
+            "embed_latency_ms": embed_latency_ms,
         }
 
     try:
@@ -294,6 +340,7 @@ async def gather_rag_data(
         "hits_total": hits_total,
         "rag_latency_ms": rag_latency_ms,
         "embed_error": embed_error,
+        "embed_latency_ms": embed_latency_ms,
     }
 
 
