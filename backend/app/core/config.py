@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     rag_min_facts: int = Field(4, alias="RAG_MIN_FACTS")
     amvera_api_token: str = Field(..., alias="AMVERA_API_TOKEN")
     amvera_api_url: AnyHttpUrl = Field(
-        "https://llm.amvera.ai/v1", alias="AMVERA_API_URL"
+        "https://llm.amvera.ai", alias="AMVERA_API_URL"
     )
+    amvera_inference_name: str = Field("deepseek", alias="AMVERA_INFERENCE_NAME")
     amvera_model: str = Field("deepseek-chat", alias="AMVERA_MODEL")
     shelter_cloud_token: str = Field(..., alias="SHELTER_CLOUD_TOKEN")
 

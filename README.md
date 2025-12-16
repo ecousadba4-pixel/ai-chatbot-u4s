@@ -18,8 +18,9 @@
 - `DATABASE_URL` — строка подключения `asyncpg`.
 - `QDRANT_URL` — базовый URL кластера Qdrant.
 - `AMVERA_API_TOKEN` — токен доступа к Amvera API.
-- `AMVERA_API_URL` — базовый URL Amvera API (по умолчанию `https://llm.amvera.ai/v1`).
-- `AMVERA_MODEL` — модель DeepSeek, указанная в Amvera.
+- `AMVERA_API_URL` — базовый URL Amvera API (по умолчанию `https://llm.amvera.ai`).
+- `AMVERA_INFERENCE_NAME` — имя inference-эндпоинта Amvera (`llama`, `gpt`, `deepseek`, `qwen`).
+- `AMVERA_MODEL` — модель, указанная в Amvera (например `deepseek-chat`).
 - `SHELTER_CLOUD_TOKEN` — токен PMS Frontdesk24.
 - `LLM_DRY_RUN` — `true/false` для отключения реальных запросов в LLM.
 
@@ -31,6 +32,15 @@
 ```bash
 pip install -r backend/requirements.txt
 uvicorn app.main:app --reload --app-dir backend
+```
+
+## Проверка подключения к Amvera
+```bash
+AMVERA_API_TOKEN=... \
+AMVERA_API_URL=https://llm.amvera.ai \
+AMVERA_INFERENCE_NAME=deepseek \
+AMVERA_MODEL=deepseek-chat \
+python backend/scripts/test_amvera_llm.py
 ```
 
 ## Расширение actions
