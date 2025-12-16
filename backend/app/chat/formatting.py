@@ -85,8 +85,6 @@ def format_shelter_quote(
     if remaining > 0:
         parts.append(f"…и ещё {remaining} вариантов. Сказать \"покажи ещё\"?")
 
-    parts.append("Нужно оформить бронирование?")
-
     return "\n\n".join(filter(None, parts))
 
 

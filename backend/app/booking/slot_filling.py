@@ -26,7 +26,7 @@ DATE_ISO_RE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
 DATE_DOTTED_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b")
 DATE_DOTTED_SHORT_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?![./-]\d)")
 DATE_TEXT_RE = re.compile(
-    r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s*(20\d{2})?",
+    r"\b(\d{1,2})(?:-?го)?\s+([а-яА-ЯёЁ]+)\s*(20\d{2})?",
     re.IGNORECASE,
 )
 ADULT_PATTERNS = [
@@ -193,8 +193,11 @@ class SlotFiller:
 
     def _parse_text_date(self, match: re.Match[str]) -> date | None:
         day_raw, month_raw, year_raw = match.groups()
-        month_key = month_raw.lower()[:5]
-        month = MONTHS.get(month_key)
+        lowered_month = month_raw.lower()
+        month = next(
+            (value for key, value in MONTHS.items() if lowered_month.startswith(key)),
+            None,
+        )
         if not month:
             return None
         year = int(year_raw) if year_raw else date.today().year

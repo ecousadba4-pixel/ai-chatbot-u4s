@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import logging
 import re
 from zoneinfo import ZoneInfo
+
 
 MONTHS = {
     "янв": 1,
@@ -23,7 +25,7 @@ MONTHS = {
 
 
 DATE_RANGE_TEXT_RE = re.compile(
-    r"(?:с\s*)?(?P<start>\d{1,2})\s*(?:[-–]|по)?\s*(?P<end>\d{1,2})\s+"
+    r"(?:с\s*)?(?P<start>\d{1,2})\s*(?:[-–]\s*|по\s+)(?P<end>\d{1,2})\s+"
     r"(?P<month>[а-яА-ЯёЁ]+)(?:\s+(?P<year>\d{4}))?",
     re.IGNORECASE,
 )
@@ -36,7 +38,7 @@ DATE_ISO_RE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
 DATE_DOTTED_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b")
 DATE_DOTTED_SHORT_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?![./-]\d)")
 DATE_TEXT_RE = re.compile(
-    r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s*(20\d{2})?",
+    r"\b(\d{1,2})(?:-?го)?\s+([а-яА-ЯёЁ]+)\s*(20\d{2})?",
     re.IGNORECASE,
 )
 
@@ -102,8 +104,11 @@ def _parse_dotted(match: re.Match[str], *, current: date) -> date | None:
 
 def _parse_text(match: re.Match[str], *, current: date) -> date | None:
     day_raw, month_raw, year_raw = match.groups()
-    month_key = month_raw.lower()[:3]
-    month = MONTHS.get(month_key)
+    lowered_month = month_raw.lower()
+    month = next(
+        (value for key, value in MONTHS.items() if lowered_month.startswith(key)),
+        None,
+    )
     if not month:
         return None
     if year_raw:
@@ -195,7 +200,9 @@ def _extract_dates(text: str, *, current: date) -> list[date]:
         if iso not in seen:
             seen.add(iso)
             dates.append(parsed_date)
-    return dates[:2]
+    result = dates[:2]
+    logger.debug("Parsing dates from text %r -> %s", text, [d.isoformat() for d in result])
+    return result
 
 
 def _extract_nights(text: str) -> int | None:
@@ -314,3 +321,4 @@ def extract_booking_entities_ru(
 
 
 __all__ = ["extract_booking_entities_ru", "BookingEntities"]
+logger = logging.getLogger(__name__)
