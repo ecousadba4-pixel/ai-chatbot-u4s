@@ -24,14 +24,34 @@ MONTHS = {
 
 DATE_ISO_RE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
 DATE_DOTTED_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b")
-DATE_DOTTED_SHORT_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?![./-]\d)")
+DATE_DOTTED_SHORT_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?![./-]?\d)")
 DATE_TEXT_RE = re.compile(
     r"\b(\d{1,2})(?:-?го)?\s+([а-яА-ЯёЁ]+)\s*(20\d{2})?",
     re.IGNORECASE,
 )
+RUS_NUMBER_WORDS: dict[str, int] = {
+    "один": 1,
+    "одна": 1,
+    "два": 2,
+    "двое": 2,
+    "три": 3,
+    "трое": 3,
+    "четыре": 4,
+    "четверо": 4,
+}
+NUMBER_WORD_PATTERN = r"один|одна|два|двое|три|трое|четыре|четверо"
 ADULT_PATTERNS = [
     re.compile(r"(?:взросл\w*|adult\w*)\s*[:=]?\s*(\d+)", re.IGNORECASE),
     re.compile(r"(\d+)\s*(?:взросл\w*|adult\w*)", re.IGNORECASE),
+    re.compile(
+        rf"(?:взросл\w*|adult\w*)\s*[:=]?\s*({NUMBER_WORD_PATTERN})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"({NUMBER_WORD_PATTERN})\s*(?:взросл\w*|adult\w*)",
+        re.IGNORECASE,
+    ),
+    re.compile(rf"нас\s+({NUMBER_WORD_PATTERN}|\d+)", re.IGNORECASE),
 ]
 CHILDREN_PATTERNS = [
     re.compile(
@@ -61,6 +81,8 @@ class SlotState:
     children_ages: list[int] = field(default_factory=list)
     room_type: str | None = None
     errors: list[str] = field(default_factory=list)
+    last_prompted_slot: str | None = None
+    last_adults_extraction: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +94,8 @@ class SlotState:
             "children_ages": self.children_ages,
             "room_type": self.room_type,
             "errors": self.errors,
+            "last_prompted_slot": self.last_prompted_slot,
+            "last_adults_extraction": self.last_adults_extraction,
         }
 
     def guests(self) -> Guests | None:
@@ -100,8 +124,13 @@ class SlotFiller:
             if not state.check_out and len(dates) >= 2:
                 state.check_out = dates[1]
 
+        state.last_adults_extraction = None
+
         if state.adults is None:
-            state.adults = self._extract_first_number(lowered, ADULT_PATTERNS)
+            adults_value = self._extract_adults(lowered)
+            state.last_adults_extraction = adults_value
+            if adults_value is not None:
+                state.adults = adults_value
 
         if state.children is None:
             state.children = self._extract_first_number(lowered, CHILDREN_PATTERNS)
@@ -230,6 +259,39 @@ class SlotFiller:
             if key in text:
                 return value
         return None
+
+    def _extract_adults(self, text: str, *, allow_general_numbers: bool = True) -> int | None:
+        for pattern in ADULT_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                value = self._parse_number_token(match.group(1))
+                if value is not None:
+                    return value
+
+        stripped = text.strip()
+        simple_number = self._parse_number_token(stripped) if allow_general_numbers else None
+        if simple_number is not None and re.fullmatch(rf"({NUMBER_WORD_PATTERN}|\d+)", stripped):
+            return simple_number
+
+        if allow_general_numbers:
+            general_number = self._extract_first_number(
+                stripped, [re.compile(r"\b(\d+)\b")]
+            )
+            if general_number is not None and str(general_number) == stripped:
+                return general_number
+
+        return None
+
+    def _parse_number_token(self, token: str | None) -> int | None:
+        if not token:
+            return None
+        normalized = token.strip().lower()
+        if normalized.isdigit():
+            try:
+                return int(normalized)
+            except ValueError:
+                return None
+        return RUS_NUMBER_WORDS.get(normalized)
 
     def _extract_first_number(self, text: str, patterns: list[re.Pattern[str]]) -> int | None:
         for pattern in patterns:

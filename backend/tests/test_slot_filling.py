@@ -1,5 +1,5 @@
-import sys
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -51,3 +51,28 @@ def test_infers_children_count_from_ages_when_missing():
     assert state.adults == 2
     assert state.children == 2
     assert state.children_ages == [4, 6]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("2", 2),
+        ("двое", 2),
+        ("нас двое", 2),
+        ("два взрослых", 2),
+    ],
+)
+def test_extracts_adults_from_numeric_and_word_answers(text, expected):
+    filler = SlotFiller()
+
+    state = filler.extract(text)
+
+    assert state.adults == expected
+
+
+def test_returns_none_when_adults_not_understood():
+    filler = SlotFiller()
+
+    state = filler.extract("много")
+
+    assert state.adults is None

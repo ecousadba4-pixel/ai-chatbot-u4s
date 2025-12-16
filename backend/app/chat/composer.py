@@ -1,5 +1,6 @@
 from typing import Any
 
+import logging
 import time
 from datetime import date, timedelta
 
@@ -20,6 +21,9 @@ from app.llm.prompts import FACTS_PROMPT
 from app.rag.context_builder import build_context
 from app.rag.qdrant_client import QdrantClient
 from app.rag.retriever import gather_rag_data
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationStateStore:
@@ -84,6 +88,15 @@ class ChatComposer:
         state = self._slot_filler.extract(text, state)
         self._apply_children_answer(text, state)
 
+        previously_prompted_adults = state.last_prompted_slot == "adults"
+        if state.adults is None and previously_prompted_adults:
+            guarded_adults = self._slot_filler._extract_adults(  # noqa: SLF001
+                text, allow_general_numbers=True
+            )
+            if guarded_adults is not None:
+                state.adults = guarded_adults
+                state.last_adults_extraction = guarded_adults
+
         if entities.checkin and not state.check_in:
             state.check_in = entities.checkin
         if entities.checkout and not state.check_out:
@@ -116,7 +129,6 @@ class ChatComposer:
         state.errors = self._slot_filler._validate_dates(state)  # noqa: SLF001
 
         missing = self._missing_booking_fields(state)
-        self._store.set(session_id, state)
         debug: dict[str, Any] = {
             "intent": "booking_calculation",
             "booking_entities": entities.__dict__,
@@ -127,16 +139,38 @@ class ChatComposer:
             "llm_called": False,
         }
 
+        logger.debug(
+            "Booking calculation input=%r adults_extracted=%s state=%s entities=%s",
+            text,
+            state.last_adults_extraction,
+            state.as_dict(),
+            entities.__dict__,
+        )
+
         next_slot = self._next_booking_question(state)
         if state.errors:
+            state.last_prompted_slot = next_slot or "checkin"
+            self._store.set(session_id, state)
             question = self._build_booking_prompt(
                 state, next_slot or "checkin", prefix=state.errors[0]
             )
             return {"answer": question, "debug": debug}
 
         if next_slot:
-            question = self._build_booking_prompt(state, next_slot)
+            prefix = None
+            if (
+                next_slot == "adults"
+                and previously_prompted_adults
+                and state.last_adults_extraction is None
+            ):
+                prefix = "Не совсем понял количество взрослых. Подскажите, пожалуйста, числом 🙂"
+
+            state.last_prompted_slot = next_slot
+            self._store.set(session_id, state)
+            question = self._build_booking_prompt(state, next_slot, prefix=prefix)
             return {"answer": question, "debug": debug}
+
+        self._store.set(session_id, state)
 
         guests = Guests(adults=state.adults or 0, children=state.children or 0)
 
