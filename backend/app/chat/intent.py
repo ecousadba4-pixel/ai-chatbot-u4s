@@ -37,8 +37,24 @@ LODGING_KEYWORDS = {
 }
 
 
-def detect_intent(text: str) -> str:
+def detect_intent(text: str, booking_entities: dict | None = None) -> str:
     normalized = text.lower()
+
+    booking_entities = booking_entities or {}
+    has_price_markers = any(
+        marker in normalized
+        for marker in [
+            "сколько стоит",
+            "цена",
+            "стоимость",
+            "рассчитай",
+            "посчитай",
+            "тариф",
+        ]
+    )
+    if has_price_markers:
+        return "booking_calculation"
+
     for pattern in KNOWLEDGE_PATTERNS:
         if re.search(pattern, normalized):
             return "knowledge_lookup"

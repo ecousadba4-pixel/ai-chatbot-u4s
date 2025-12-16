@@ -4,6 +4,8 @@ import time
 
 import asyncpg
 
+from app.booking.entities import BookingEntities
+from app.booking.models import Guests
 from app.booking.service import BookingQuoteService
 from app.booking.slot_filling import SlotFiller, SlotState
 from app.core.config import get_settings
@@ -57,10 +59,78 @@ class ChatComposer:
         self._booking_service = booking_service
         self._store = store
 
+    async def handle_booking_calculation(
+        self, entities: BookingEntities
+    ) -> dict[str, Any]:
+        debug: dict[str, Any] = {
+            "intent": "booking_calculation",
+            "booking_entities": entities.__dict__,
+            "missing_fields": entities.missing_fields,
+            "shelter_called": False,
+            "shelter_latency_ms": 0,
+            "shelter_error": None,
+            "llm_called": False,
+        }
+
+        if entities.missing_fields:
+            questions = []
+            prompts = {
+                "checkin": "Уточните дату заезда, пожалуйста",
+                "checkout": "Уточните дату выезда, пожалуйста",
+                "adults": "Сколько взрослых будет проживать?",
+            }
+            for field in entities.missing_fields:
+                questions.append(prompts.get(field, field))
+            polite_request = "; ".join(questions)
+            return {"answer": polite_request, "debug": debug}
+
+        guests = Guests(adults=entities.adults or 0, children=entities.children)
+
+        started = time.perf_counter()
+        try:
+            offers = await self._booking_service.get_quotes(
+                check_in=entities.checkin or "",
+                check_out=entities.checkout or "",
+                guests=guests,
+            )
+            debug["shelter_called"] = True
+            debug["shelter_latency_ms"] = int(
+                (time.perf_counter() - started) * 1000
+            )
+        except Exception as exc:  # noqa: BLE001
+            debug["shelter_called"] = True
+            debug["shelter_error"] = str(exc)
+            return {
+                "answer": "Не получилось получить расчёт, уточните, пожалуйста, детали позже.",
+                "debug": debug,
+            }
+
+        if not offers:
+            return {
+                "answer": "К сожалению, не удалось найти доступные варианты на указанные даты.",
+                "debug": debug,
+            }
+
+        lines = []
+        for offer in offers:
+            line = f"{offer.room_name}: {offer.total_price:.0f} {offer.currency}"
+            if offer.breakfast_included:
+                line += " (завтрак включён)"
+            if offer.room_area:
+                line += f", площадь {offer.room_area} м²"
+            lines.append(line)
+
+        if entities.nights:
+            lines.append(f"Всего ночей: {entities.nights}")
+        lines.append("Нужно оформить бронирование?")
+
+        return {"answer": "\n".join(lines), "debug": debug}
+
     async def handle_booking(self, session_id: str, text: str) -> dict[str, Any]:
         state = self._store.get(session_id) or SlotState()
         state = self._slot_filler.extract(text, state)
         clarification = self._slot_filler.clarification(state)
+        missing = self._slot_filler.missing_slots(state)
         self._store.set(session_id, state)
 
         if clarification:
@@ -70,6 +140,7 @@ class ChatComposer:
                 "debug": {
                     "intent": "booking_quote",
                     "slots": state.as_dict(),
+                    "missing_fields": missing,
                     "pms_called": False,
                     "offers_count": 0,
                 },
@@ -82,6 +153,7 @@ class ChatComposer:
                 "debug": {
                     "intent": "booking_quote",
                     "slots": state.as_dict(),
+                    "missing_fields": missing,
                     "pms_called": False,
                     "offers_count": 0,
                 },
@@ -100,6 +172,7 @@ class ChatComposer:
                 "debug": {
                     "intent": "booking_quote",
                     "slots": state.as_dict(),
+                    "missing_fields": [],
                     "pms_called": True,
                     "offers_count": 0,
                 },
@@ -121,6 +194,7 @@ class ChatComposer:
             "debug": {
                 "intent": "booking_quote",
                 "slots": state.as_dict(),
+                "missing_fields": [],
                 "pms_called": True,
                 "offers_count": len(offers),
             },
