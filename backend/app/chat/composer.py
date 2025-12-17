@@ -1,6 +1,7 @@
 from typing import Any
 
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta
 
@@ -1092,6 +1093,8 @@ class ChatComposer:
 
         qdrant_hits = rag_hits.get("qdrant_hits") or rag_hits.get("facts_hits", [])
         faq_hits = rag_hits.get("faq_hits", [])
+        facts_hits = rag_hits.get("facts_hits") or qdrant_hits
+        files_hits = rag_hits.get("files_hits", [])
         total_hits = len(qdrant_hits) + len(faq_hits)
 
         debug: dict[str, Any] = {
@@ -1113,26 +1116,86 @@ class ChatComposer:
         if rag_hits.get("embed_error"):
             debug["embed_error"] = rag_hits["embed_error"]
 
-        if not total_hits:
+        hits_total = debug["hits_total"]
+        if hits_total < max(1, self._settings.rag_min_facts):
+            fallback_answer = (
+                "Я не нашёл подтверждённых сведений в базе знаний по этому вопросу. "
+                "Попробуйте уточнить запрос или загрузить описание с нужной информацией."
+            )
             return {
-                "answer": (
-                    "Я не нашёл подходящих фрагментов в базе знаний. Если загрузите файл или страницу с типами домиков/номеров, я буду отвечать точнее."
-                ),
+                "answer": self._finalize_short_answer(fallback_answer),
+                "debug": {**debug, "guard_triggered": True, "llm_called": False},
+            }
+
+        max_snippets = max(1, self._settings.rag_max_snippets)
+        context_text = build_context(
+            facts_hits=facts_hits[:max_snippets],
+            files_hits=files_hits[:max_snippets],
+            faq_hits=faq_hits,
+        )
+
+        system_prompt_parts = [
+            FACTS_PROMPT,
+            (
+                "Отвечай одним цельным текстом на 2–4 предложения. "
+                "Используй переданный контекст только для понимания ответа и не перечисляй файлы, блоки или пары вопрос-ответ. "
+                "В конце можешь добавить фразу «Если хотите — расскажу подробнее»."
+            ),
+        ]
+        if context_text:
+            system_prompt_parts.append(context_text)
+
+        system_prompt = "\n\n".join(part for part in system_prompt_parts if part)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ]
+
+        debug["llm_called"] = True
+        try:
+            llm_started = time.perf_counter()
+            answer = await self._llm.chat(
+                model=self._settings.amvera_model, messages=messages
+            )
+            debug["llm_latency_ms"] = int((time.perf_counter() - llm_started) * 1000)
+        except Exception as exc:  # noqa: BLE001
+            debug["llm_error"] = str(exc)
+            generic_answer = (
+                "Не получилось сформировать ответ, но я продолжу искать нужные данные. "
+                "Попробуйте чуть позже или уточните вопрос."
+            )
+            return {
+                "answer": self._finalize_short_answer(generic_answer),
                 "debug": debug,
             }
 
-        summary_lines = ["Нашёл в базе знаний:"]
-        for hit in qdrant_hits[: self._settings.rag_max_snippets]:
-            title = hit.get("title") or hit.get("source") or "Запись"
-            text = (hit.get("text") or "").strip()
-            if text:
-                summary_lines.append(f"• {title}: {text[:180]}")
-        for faq in faq_hits[:2]:
-            question = faq.get("question") or "Вопрос"
-            answer = faq.get("answer") or ""
-            summary_lines.append(f"• FAQ {question}: {answer[:180]}")
+        final_answer = self._finalize_short_answer(
+            answer or "Информация из базы пока не найдена."
+        )
 
-        return {"answer": "\n".join(summary_lines), "debug": debug}
+        return {"answer": final_answer, "debug": debug}
+
+    def _finalize_short_answer(self, answer: str) -> str:
+        cleaned = (answer or "").strip()
+        if not cleaned:
+            return "Информации пока нет, но могу поискать ещё. Если хотите — расскажу подробнее."
+
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+        normalized = [sentence.strip() for sentence in sentences if sentence.strip()]
+
+        if len(normalized) > 4:
+            cleaned = " ".join(normalized[:4])
+        elif normalized:
+            cleaned = " ".join(normalized)
+
+        if not cleaned.endswith(".") and not cleaned.endswith("!") and not cleaned.endswith("?"):
+            cleaned = f"{cleaned}."
+
+        if "Если хотите — расскажу подробнее." not in cleaned:
+            cleaned = f"{cleaned} Если хотите — расскажу подробнее."
+
+        return cleaned
 
 
 __all__ = [
