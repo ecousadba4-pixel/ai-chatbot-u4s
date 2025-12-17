@@ -10,12 +10,14 @@ import asyncpg
 from app.core.config import Settings, get_settings
 from app.booking.entities import BookingEntities
 from app.booking.fsm import BookingContext, BookingState, initial_booking_context
-from app.booking.models import Guests
+from app.booking.models import BookingQuote, Guests
 from app.booking.service import BookingQuoteService
 from app.chat.formatting import (
     detect_detail_mode,
     format_shelter_quote,
+    format_more_offers,
     postprocess_answer,
+    select_min_offer_per_room_type,
 )
 from app.booking.parsers import (
     extract_guests,
@@ -631,6 +633,25 @@ class ChatComposer:
             room_type=context.room_type,
             missing_fields=[],
         )
+        
+        # Сохраняем уникальные офферы в контексте для функции "покажи все"
+        unique_offers = select_min_offer_per_room_type(offers)
+        sorted_offers = sorted(unique_offers, key=lambda o: o.total_price)
+        context.offers = [
+            {
+                "room_name": o.room_name,
+                "total_price": o.total_price,
+                "currency": o.currency,
+                "breakfast_included": o.breakfast_included,
+                "room_area": o.room_area,
+                "check_in": o.check_in,
+                "check_out": o.check_out,
+                "guests": {"adults": o.guests.adults, "children": o.guests.children},
+            }
+            for o in sorted_offers
+        ]
+        context.last_offer_index = min(3, len(sorted_offers))  # Показали первые 3
+        
         price_block = format_shelter_quote(booking_entities, offers)
         context.state = BookingState.AWAITING_USER_DECISION
         return price_block
@@ -668,6 +689,23 @@ class ChatComposer:
             )
             return " ".join(filter(None, [selection, note, "Если нужно изменить даты, скажите 'начнём заново'."]))
 
+        # Обработка запроса "покажи все" / "покажи больше вариантов"
+        show_more_triggers = {
+            "покажи все",
+            "покажи всё",
+            "показать все",
+            "показать всё",
+            "покажи больше",
+            "показать больше",
+            "ещё варианты",
+            "еще варианты",
+            "другие варианты",
+            "остальные",
+            "все варианты",
+        }
+        if any(trigger in normalized for trigger in show_more_triggers):
+            return self._show_more_offers(context)
+
         if "дат" in normalized:
             context.state = BookingState.ASK_CHECKIN
             context.checkin = None
@@ -686,6 +724,49 @@ class ChatComposer:
             "Если хотите изменить параметры, напишите новые даты или количество гостей. "
             "Чтобы забронировать, воспользуйтесь ссылкой https://usadba4.ru/bronirovanie/."
         )
+
+    def _show_more_offers(self, context: BookingContext) -> str:
+        """Показывает оставшиеся офферы из сохранённого списка."""
+        if not context.offers:
+            return (
+                "У меня нет сохранённых вариантов. "
+                "Если хотите изменить параметры, напишите новые даты или количество гостей."
+            )
+
+        start_idx = context.last_offer_index
+        if start_idx >= len(context.offers):
+            context.state = BookingState.AWAITING_USER_DECISION
+            return (
+                "Вы уже видели все доступные предложения. "
+                "Если хотите изменить параметры, напишите новые даты или количество гостей."
+            )
+
+        # Восстанавливаем BookingQuote из сохранённых dict'ов
+        remaining_dicts = context.offers[start_idx:]
+        offers_to_show = []
+        for o in remaining_dicts:
+            guests_data = o.get("guests", {})
+            guests = Guests(
+                adults=guests_data.get("adults", 2),
+                children=guests_data.get("children", 0),
+            )
+            offers_to_show.append(
+                BookingQuote(
+                    room_name=o.get("room_name", "Номер"),
+                    total_price=o.get("total_price", 0),
+                    currency=o.get("currency", "RUB"),
+                    breakfast_included=o.get("breakfast_included", False),
+                    room_area=o.get("room_area"),
+                    check_in=o.get("check_in", ""),
+                    check_out=o.get("check_out", ""),
+                    guests=guests,
+                )
+            )
+
+        text, new_index = format_more_offers(offers_to_show, 0)
+        context.last_offer_index = start_idx + new_index
+        context.state = BookingState.AWAITING_USER_DECISION
+        return text
 
     def _is_cancel_command(self, normalized: str) -> bool:
         return normalized in {

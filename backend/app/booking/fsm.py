@@ -32,6 +32,8 @@ class BookingContext:
     state: BookingState | None = None
     retries: dict[str, int] = field(default_factory=dict)
     updated_at: float = field(default_factory=lambda: datetime.utcnow().timestamp())
+    offers: list[dict[str, Any]] = field(default_factory=list)
+    last_offer_index: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +48,8 @@ class BookingContext:
             "state": self.state.value if self.state else None,
             "retries": dict(self.retries),
             "updated_at": self.updated_at,
+            "offers": list(self.offers),
+            "last_offer_index": self.last_offer_index,
         }
 
     @classmethod
@@ -66,6 +70,8 @@ class BookingContext:
             state=booking_state,
             retries=dict(raw.get("retries") or {}),
             updated_at=raw.get("updated_at", datetime.utcnow().timestamp()),
+            offers=list(raw.get("offers") or []),
+            last_offer_index=raw.get("last_offer_index", 0),
         )
 
     def compact(self) -> dict[str, Any]:

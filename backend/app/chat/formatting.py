@@ -109,8 +109,32 @@ def format_shelter_quote(
     return "\n\n".join(filter(None, parts))
 
 
+def format_more_offers(
+    offers: list[BookingQuote],
+    start_index: int,
+) -> tuple[str, int]:
+    """
+    Форматирует оставшиеся офферы начиная с start_index.
+    
+    Возвращает (форматированный_текст, новый_индекс).
+    """
+    if start_index >= len(offers):
+        return "Вы уже видели все доступные предложения.", start_index
+    
+    remaining_offers = offers[start_index:]
+    if not remaining_offers:
+        return "Вы уже видели все доступные предложения.", start_index
+    
+    formatted = [_format_offer(offer) for offer in remaining_offers]
+    new_index = len(offers)
+    
+    text = "Показываю ещё варианты:\n\n" + "\n\n".join(formatted)
+    return text, new_index
+
+
 __all__ = [
     "format_shelter_quote",
+    "format_more_offers",
     "select_min_offer_per_room_type",
     "format_money_rub",
     "format_date_ddmm",
