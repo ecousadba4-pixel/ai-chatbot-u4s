@@ -45,4 +45,9 @@
 #u4s-q{ flex:1; border:1px solid rgba(0,0,0,.12); border-radius:999px; padding:10px 14px; outline:none; font:14px system-ui; transition:border .2s, box-shadow .2s }
 #u4s-q:focus{ border-color:var(--u4s-primary); box-shadow:0 0 0 3px rgba(138,157,76,.18) }
 #u4s-send{ min-width:44px; border-radius:999px; border:0; background:var(--u4s-primary); color:#fff; font:600 14px system-ui; padding:0 14px; cursor:pointer; transition:opacity .15s, transform .15s }
-#u4s-send:disabled{ opacity:.6; cursor:not-allowed } 
+#u4s-send:disabled{ opacity:.6; cursor:not-allowed }
+.chat-message{ white-space:pre-wrap; word-break:break-word }
+.chat-link{ color:#2563eb; text-decoration:underline }
+.booking-btn-wrap{ margin-top:10px }
+.booking-btn{ display:inline-block; padding:10px 16px; background:#16a34a; color:#fff; border-radius:8px; text-decoration:none; font-weight:600 }
+.booking-btn:hover{ background:#15803d }
