@@ -94,12 +94,31 @@ class Settings(BaseSettings):
         alias="LLM_STREAMING_ENABLED",
         description="Включить streaming режим для LLM (быстрый первый токен)"
     )
+
+    # Shared caches (RAG/LLM)
+    use_redis_cache: bool = Field(
+        True,
+        alias="USE_REDIS_CACHE",
+        description="Использовать Redis для кэшей RAG и LLM",
+    )
+    rag_cache_ttl: float = Field(
+        120.0,
+        alias="RAG_CACHE_TTL",
+        description="TTL RAG-кэша в секундах",
+    )
     
     # Redis state store
     use_redis_state_store: bool = Field(
         True,
         alias="USE_REDIS_STATE_STORE",
         description="Использовать Redis для хранения состояния диалога (вместо in-memory)"
+    )
+
+    # Startup warmup
+    enable_startup_warmup: bool = Field(
+        True,
+        alias="ENABLE_STARTUP_WARMUP",
+        description="Выполнять прогрев внешних сервисов при старте",
     )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)

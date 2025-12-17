@@ -1,5 +1,7 @@
 from typing import Any, TYPE_CHECKING
 
+from functools import lru_cache
+
 import logging
 import re
 import time
@@ -66,6 +68,49 @@ class InMemoryConversationStateStore(ConversationStateStore):
 
     def clear(self, session_id: str) -> None:
         self._storage.pop(session_id, None)
+
+
+class _ParsedMessageCache:
+    """Кэширует результаты парсинга для одного сообщения пользователя."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    @property
+    def lowered(self) -> str:
+        return self._text.lower()
+
+    @lru_cache(maxsize=1)
+    def guests(self) -> dict[str, int]:
+        return extract_guests(self._text)
+
+    @lru_cache(maxsize=None)
+    def checkin(self, now_date: date | None = None) -> str | None:
+        return parse_checkin(self._text, now_date=now_date)
+
+    @lru_cache(maxsize=1)
+    def nights(self) -> int | None:
+        return parse_nights(self._text)
+
+    @lru_cache(maxsize=None)
+    def adults(self, allow_general_numbers: bool = True) -> int | None:
+        return parse_adults(self._text, allow_general_numbers=allow_general_numbers)
+
+    @lru_cache(maxsize=1)
+    def children_count(self) -> int | None:
+        return parse_children_count(self._text)
+
+    @lru_cache(maxsize=None)
+    def children_ages(self, expected: int | None = None) -> list[int]:
+        return parse_children_ages(self._text, expected=expected)
+
+    @lru_cache(maxsize=1)
+    def room_type(self) -> str | None:
+        return parse_room_type(self._text)
 
 
 class ChatComposer:
@@ -165,6 +210,10 @@ class ChatComposer:
         context.updated_at = datetime.utcnow().timestamp()
         self._booking_store.set(session_id, context.to_dict())
 
+    def _parsers_for_message(self, text: str) -> _ParsedMessageCache:
+        """Создаёт кэшируемые парсеры для входящего сообщения."""
+        return _ParsedMessageCache(text)
+
     def _booking_debug(self, context: BookingContext) -> dict[str, Any]:
         return {
             "intent": "booking_calculation",
@@ -231,9 +280,10 @@ class ChatComposer:
         )
 
         self._apply_entities_to_context(context, entities)
-        self._apply_entities_from_message(context, text)
+        parsers = self._parsers_for_message(text)
+        self._apply_entities_from_message(context, parsers)
 
-        answer = await self._advance_booking_fsm(session_id, context, text, debug)
+        answer = await self._advance_booking_fsm(session_id, context, text, debug, parsers)
         self._save_booking_context(session_id, context)
         return answer
 
@@ -255,17 +305,17 @@ class ChatComposer:
         if context.room_type is None:
             context.room_type = entities.room_type
 
-    def _apply_entities_from_message(self, context: BookingContext, text: str) -> None:
+    def _apply_entities_from_message(self, context: BookingContext, parsers: _ParsedMessageCache) -> None:
         if not context.checkin:
-            context.checkin = parse_checkin(text)
+            context.checkin = parsers.checkin()
         if context.nights is None and not context.checkout:
-            context.nights = parse_nights(text)
+            context.nights = parsers.nights()
         if not context.checkout and context.checkin:
             try:
                 checkin_date = date.fromisoformat(context.checkin)
             except ValueError:
                 checkin_date = None
-            parsed_checkout = parse_checkin(text, now_date=checkin_date or date.today())
+            parsed_checkout = parsers.checkin(now_date=checkin_date or date.today())
             if parsed_checkout and parsed_checkout != context.checkin:
                 try:
                     checkout_date = date.fromisoformat(parsed_checkout)
@@ -282,22 +332,22 @@ class ChatComposer:
                 BookingState.AWAITING_USER_DECISION,
                 BookingState.CONFIRM_BOOKING,
             }
-            adults = parse_adults(text, allow_general_numbers=allow_general_adults)
+            adults = parsers.adults(allow_general_numbers=allow_general_adults)
             if adults is not None:
                 context.adults = adults
         if context.children is None and context.state in {
             BookingState.ASK_CHILDREN_COUNT,
             BookingState.ASK_CHILDREN_AGES,
         }:
-            context.children = parse_children_count(text)
+            context.children = parsers.children_count()
         if (
             (context.children or 0) > 0
             and not context.children_ages
             and context.state == BookingState.ASK_CHILDREN_AGES
         ):
-            context.children_ages = parse_children_ages(text, expected=context.children)
+            context.children_ages = parsers.children_ages(expected=context.children)
         if context.room_type is None:
-            context.room_type = parse_room_type(text)
+            context.room_type = parsers.room_type()
 
     def _ask_with_retry(self, context: BookingContext, state: BookingState, question: str) -> str:
         attempts = context.retries.get(state.value, 0) + 1
@@ -345,6 +395,7 @@ class ChatComposer:
         context: BookingContext,
         text: str,
         debug: dict[str, Any],
+        parsers: _ParsedMessageCache,
     ) -> str:
         state = context.state or BookingState.ASK_CHECKIN
         consumed_fields: set[str] = set()
@@ -358,7 +409,7 @@ class ChatComposer:
                 if context.checkin:
                     state = BookingState.ASK_NIGHTS_OR_CHECKOUT
                     continue
-                parsed = parse_checkin(text)
+                parsed = parsers.checkin()
                 if parsed:
                     context.checkin = parsed
                     context.state = BookingState.ASK_NIGHTS_OR_CHECKOUT
@@ -371,14 +422,14 @@ class ChatComposer:
                 if context.nights is not None or context.checkout:
                     state = BookingState.ASK_ADULTS
                     continue
-                nights = parse_nights(text)
+                nights = parsers.nights()
                 checkout_value = None
                 try:
                     checkin_date = date.fromisoformat(context.checkin) if context.checkin else None
                 except ValueError:
                     checkin_date = None
                 if checkin_date:
-                    parsed_checkout = parse_checkin(text, now_date=checkin_date)
+                    parsed_checkout = parsers.checkin(now_date=checkin_date)
                     if parsed_checkout:
                         try:
                             checkout_date = date.fromisoformat(parsed_checkout)
@@ -405,7 +456,7 @@ class ChatComposer:
 
             if state == BookingState.ASK_ADULTS:
                 context.state = BookingState.ASK_ADULTS
-                guests_from_text = extract_guests(text)
+                guests_from_text = parsers.guests()
                 adults_from_text = guests_from_text.get("adults")
                 children_from_text = guests_from_text.get("children")
                 if adults_from_text is not None:
@@ -426,7 +477,7 @@ class ChatComposer:
                     state = BookingState.ASK_CHILDREN_COUNT
                     continue
                 allow_general = "nights" not in consumed_fields
-                adults = parse_adults(text, allow_general_numbers=allow_general)
+                adults = parsers.adults(allow_general_numbers=allow_general)
                 if adults is not None:
                     context.adults = adults
                     consumed_fields.add("adults")
@@ -443,7 +494,7 @@ class ChatComposer:
 
             if state == BookingState.ASK_CHILDREN_COUNT:
                 context.state = BookingState.ASK_CHILDREN_COUNT
-                guests_from_text = extract_guests(text)
+                guests_from_text = parsers.guests()
                 children_from_text = guests_from_text.get("children")
                 adults_from_text = guests_from_text.get("adults")
                 if adults_from_text is not None:
@@ -453,14 +504,14 @@ class ChatComposer:
                     if children_from_text <= 0:
                         context.children_ages = []
 
-                lowered_input = text.lower()
+                lowered_input = parsers.lowered
                 if context.children is not None:
                     if (context.children or 0) > 0:
                         if context.children_ages and len(context.children_ages) == context.children:
                             state = BookingState.CALCULATE
                             continue
                         if "взросл" not in lowered_input:
-                            ages = parse_children_ages(text, expected=context.children)
+                            ages = parsers.children_ages(expected=context.children)
                             if ages:
                                 context.children_ages = ages
                                 state = BookingState.CALCULATE
@@ -475,7 +526,7 @@ class ChatComposer:
                     else:
                         state = BookingState.CALCULATE
                     continue
-                children = parse_children_count(text)
+                children = parsers.children_count()
                 if children is not None:
                     context.children = children
                     if children > 0:
@@ -502,7 +553,7 @@ class ChatComposer:
                 if context.children_ages and len(context.children_ages) == context.children:
                     state = BookingState.CALCULATE
                     continue
-                ages = parse_children_ages(text, expected=context.children)
+                ages = parsers.children_ages(expected=context.children)
                 if ages:
                     context.children_ages = ages
                     state = BookingState.CALCULATE
@@ -521,11 +572,11 @@ class ChatComposer:
 
             if state == BookingState.AWAITING_USER_DECISION:
                 context.state = BookingState.AWAITING_USER_DECISION
-                return self._handle_post_quote_decision(text, context)
+                return self._handle_post_quote_decision(text, context, parsers)
 
             if state == BookingState.CONFIRM_BOOKING:
                 context.state = BookingState.CONFIRM_BOOKING
-                return self._handle_confirmation(text, context)
+                return self._handle_confirmation(text, context, parsers)
 
             return self._ask_with_retry(
                 context, BookingState.ASK_CHECKIN, "На какую дату планируете заезд?"
@@ -660,13 +711,16 @@ class ChatComposer:
         context.state = BookingState.AWAITING_USER_DECISION
         return price_block
 
-    def _handle_confirmation(self, text: str, context: BookingContext) -> str:
-        normalized = text.strip().lower()
-        return self._handle_post_quote_decision(text, context)
+    def _handle_confirmation(
+        self, text: str, context: BookingContext, parsers: _ParsedMessageCache
+    ) -> str:
+        return self._handle_post_quote_decision(text, context, parsers)
 
-    def _handle_post_quote_decision(self, text: str, context: BookingContext) -> str:
+    def _handle_post_quote_decision(
+        self, text: str, context: BookingContext, parsers: _ParsedMessageCache
+    ) -> str:
         normalized = text.strip().lower()
-        room_type = parse_room_type(text)
+        room_type = parsers.room_type()
         booking_intent = any(
             token in normalized
             for token in {

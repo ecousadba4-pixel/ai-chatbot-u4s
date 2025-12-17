@@ -4,9 +4,8 @@ import json
 from functools import lru_cache
 from typing import Any
 
-import redis.asyncio as redis
-
 from app.core.config import get_settings
+from app.session.redis_client import get_redis_client
 
 
 class SessionStore:
@@ -48,7 +47,7 @@ class SessionStore:
 @lru_cache(maxsize=1)
 def get_session_store() -> SessionStore:
     settings = get_settings()
-    client = redis.Redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=False)
+    client = get_redis_client()
     return SessionStore(client, ttl_seconds=settings.session_ttl_seconds)
 
 

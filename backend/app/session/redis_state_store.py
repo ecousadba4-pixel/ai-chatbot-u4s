@@ -15,6 +15,7 @@ import redis.asyncio as redis
 
 from app.core.config import get_settings
 from app.booking.slot_filling import SlotState
+from app.session.redis_client import close_redis_client, get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -188,11 +189,7 @@ def get_redis_state_store() -> RedisConversationStateStore:
     global _REDIS_STATE_STORE
     if _REDIS_STATE_STORE is None:
         settings = get_settings()
-        client = redis.Redis.from_url(
-            settings.redis_url,
-            encoding="utf-8",
-            decode_responses=False,
-        )
+        client = get_redis_client()
         _REDIS_STATE_STORE = RedisConversationStateStore(
             client,
             ttl_seconds=settings.session_ttl_seconds,
@@ -206,7 +203,7 @@ async def close_redis_state_store() -> None:
     global _REDIS_STATE_STORE
     if _REDIS_STATE_STORE is not None:
         try:
-            await _REDIS_STATE_STORE._redis.aclose()
+            await close_redis_client()
         except Exception as exc:
             logger.warning("Failed to close Redis connection: %s", exc)
         _REDIS_STATE_STORE = None

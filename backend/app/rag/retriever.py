@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import hashlib
 import logging
 import time
@@ -13,6 +14,7 @@ from app.core.config import get_settings
 from app.db.queries.faq import search_faq
 from app.rag.embed_client import get_embed_client
 from app.rag.qdrant_client import QdrantClient
+from app.session.redis_client import get_redis_client
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,61 @@ class RAGCache:
                 self._cache.popitem(last=False)
 
 
-_RAG_CACHE = RAGCache()
+class RedisRAGCache:
+    """Redis-based cache for sharing RAG results across replicas."""
+
+    def __init__(self, *, ttl_seconds: float = 120.0, prefix: str = "u4s:rag_cache:") -> None:
+        self._redis = get_redis_client()
+        self._ttl = int(ttl_seconds)
+        self._prefix = prefix
+
+    def _make_key(self, query: str, intent: str | None) -> str:
+        normalized = f"{query.strip().lower()}|{intent or ''}"
+        return hashlib.md5(normalized.encode(), usedforsecurity=False).hexdigest()
+
+    async def get(self, query: str, intent: str | None) -> dict[str, Any] | None:
+        key = f"{self._prefix}{self._make_key(query, intent)}"
+        try:
+            data = await self._redis.get(key)
+        except Exception as exc:  # pragma: no cover - network errors
+            logger.warning("Redis RAG cache get failed: %s", exc)
+            return None
+
+        if not data:
+            return None
+
+        try:
+            decoded = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
+            return json.loads(decoded)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to decode Redis RAG cache entry: %s", exc)
+            return None
+
+    async def set(self, query: str, intent: str | None, result: dict[str, Any]) -> None:
+        key = f"{self._prefix}{self._make_key(query, intent)}"
+        try:
+            payload = json.dumps(result, ensure_ascii=False)
+            await self._redis.setex(key, self._ttl, payload)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("Redis RAG cache set failed: %s", exc)
+
+
+_RAG_CACHE: RAGCache | RedisRAGCache | None = None
+
+
+def get_rag_cache() -> RAGCache | RedisRAGCache:
+    global _RAG_CACHE
+    if _RAG_CACHE is None:
+        settings = get_settings()
+        if settings.use_redis_cache:
+            try:
+                _RAG_CACHE = RedisRAGCache(ttl_seconds=settings.rag_cache_ttl)
+            except Exception as exc:  # pragma: no cover - fall back to memory
+                logger.warning("Falling back to in-memory RAG cache: %s", exc)
+                _RAG_CACHE = RAGCache(ttl_seconds=settings.rag_cache_ttl)
+        else:
+            _RAG_CACHE = RAGCache(ttl_seconds=settings.rag_cache_ttl)
+    return _RAG_CACHE
 
 
 async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str | None, int]:
@@ -234,10 +290,11 @@ async def gather_rag_data(
 ) -> dict[str, Any]:
     settings = get_settings()
     rag_started = time.perf_counter()
+    cache = get_rag_cache() if use_cache else None
 
     # Проверка кэша
-    if use_cache:
-        cached = await _RAG_CACHE.get(query, intent)
+    if use_cache and cache:
+        cached = await cache.get(query, intent)
         if cached is not None:
             logger.debug("RAG cache hit for query: %s", query[:50])
             # Обновляем latency для кэшированного результата
@@ -367,10 +424,10 @@ async def gather_rag_data(
     }
 
     # Сохраняем в кэш (без raw_qdrant_hits для экономии памяти)
-    if use_cache and hits_total > 0:
+    if cache and use_cache and hits_total > 0:
         cache_result = {k: v for k, v in result.items() if k != "raw_qdrant_hits"}
         cache_result["raw_qdrant_hits"] = []
-        await _RAG_CACHE.set(query, intent, cache_result)
+        await cache.set(query, intent, cache_result)
 
     return result
 

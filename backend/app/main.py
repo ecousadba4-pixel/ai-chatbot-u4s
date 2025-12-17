@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from contextlib import suppress
 
 from fastapi import Depends, FastAPI
 
@@ -27,8 +27,9 @@ setup_logging()
 
 # Выбираем хранилище состояния в зависимости от конфигурации
 if settings.use_redis_state_store:
-    state_store = get_redis_state_store()
-    booking_state_store = get_redis_state_store()
+    shared_state_store = get_redis_state_store()
+    state_store = shared_state_store
+    booking_state_store = shared_state_store
     logger.info("Using Redis state store for conversation state")
 else:
     state_store = InMemoryConversationStateStore()
@@ -125,13 +126,30 @@ async def _warmup_connections() -> None:
 
 async def lifespan(app: FastAPI):
     pool = await get_pool()
+    warmup_task: asyncio.Task | None = None
 
-    # Прогрев соединений
-    await _warmup_connections()
+    # Прогрев соединений (в фоне, если включено)
+    if settings.enable_startup_warmup:
+        def _log_warmup_result(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc:
+                logger.error("Warmup task failed: %s", exc)
+
+        warmup_task = asyncio.create_task(_warmup_connections())
+        warmup_task.add_done_callback(_log_warmup_result)
+    else:
+        logger.info("Startup warmup is disabled via configuration")
 
     try:
         yield
     finally:
+        if warmup_task:
+            warmup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup_task
+
         # Закрываем все соединения
         await pool.close()
         await qdrant_client.close()
