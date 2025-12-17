@@ -223,20 +223,55 @@
 
   // ===== Сообщения =====
 
-  const sanitizeMap = Object.freeze({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  });
+  function renderMessageText(container, text) {
+    container.textContent = "";
 
-  function sanitize(text) {
-    return (text || "").replace(/[&<>"']/g, (char) => sanitizeMap[char] || char);
-  }
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    let lastIndex = 0;
+    let match;
+    let hasBookingLink = false;
 
-  function formatMessage(text) {
-    return sanitize(text).replace(/\n/g, "<br>");
+    while ((match = urlRegex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        container.appendChild(doc.createTextNode(text.slice(lastIndex, match.index)));
+      }
+
+      const url = match[0];
+
+      const anchor = doc.createElement("a");
+      anchor.href = url;
+      anchor.textContent = url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.className = "chat-link";
+
+      container.appendChild(anchor);
+
+      if (url.startsWith("https://usadba4.ru/bronirovanie/")) {
+        hasBookingLink = true;
+      }
+
+      lastIndex = urlRegex.lastIndex;
+    }
+
+    if (lastIndex < text.length) {
+      container.appendChild(doc.createTextNode(text.slice(lastIndex)));
+    }
+
+    if (hasBookingLink) {
+      const btnWrap = doc.createElement("div");
+      btnWrap.className = "booking-btn-wrap";
+
+      const btn = doc.createElement("a");
+      btn.href = "https://usadba4.ru/bronirovanie/";
+      btn.target = "_blank";
+      btn.rel = "noopener noreferrer";
+      btn.textContent = "Забронировать";
+      btn.className = "booking-btn";
+
+      btnWrap.appendChild(btn);
+      container.appendChild(btnWrap);
+    }
   }
 
   function createTimeStamp() {
@@ -250,7 +285,12 @@
     wrapper.dataset.raw = text;
     const stamp = timestamp || createTimeStamp();
     wrapper.dataset.timestamp = stamp;
-    wrapper.innerHTML = formatMessage(text);
+
+    const messageBody = doc.createElement("div");
+    messageBody.className = "chat-message";
+    renderMessageText(messageBody, text);
+
+    wrapper.appendChild(messageBody);
 
     const timeNode = doc.createElement("div");
     timeNode.className = "u4s-time";
