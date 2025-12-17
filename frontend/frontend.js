@@ -226,14 +226,18 @@
   function renderMessageText(container, text) {
     container.textContent = "";
 
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    // Сначала преобразуем markdown-ссылки [текст](url) в просто url
+    // Это нужно для корректного отображения ссылок от LLM
+    let normalizedText = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$2");
+
+    const urlRegex = /(https?:\/\/[^\s\])<]+)/g;
     let lastIndex = 0;
     let match;
     let hasBookingLink = false;
 
-    while ((match = urlRegex.exec(text)) !== null) {
+    while ((match = urlRegex.exec(normalizedText)) !== null) {
       const url = match[0];
-      const segment = text.slice(lastIndex, match.index);
+      const segment = normalizedText.slice(lastIndex, match.index);
 
       if (url.startsWith("https://usadba4.ru/bronirovanie/")) {
         hasBookingLink = true;
@@ -257,8 +261,8 @@
 
         lastIndex = urlRegex.lastIndex;
 
-        while (lastIndex < text.length && /[\s.,;:!?)\]]/.test(text[lastIndex])) {
-          if (text[lastIndex] === "\n") {
+        while (lastIndex < normalizedText.length && /[\s.,;:!?)\]]/.test(normalizedText[lastIndex])) {
+          if (normalizedText[lastIndex] === "\n") {
             break;
           }
           lastIndex += 1;
@@ -284,8 +288,8 @@
       lastIndex = urlRegex.lastIndex;
     }
 
-    if (lastIndex < text.length) {
-      container.appendChild(doc.createTextNode(text.slice(lastIndex)));
+    if (lastIndex < normalizedText.length) {
+      container.appendChild(doc.createTextNode(normalizedText.slice(lastIndex)));
     }
 
     if (hasBookingLink) {
