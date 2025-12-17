@@ -39,57 +39,56 @@
   const timeFormatter = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
 
   let memorySessionId = null;
-
-  function createUuid() {
-    if (typeof crypto !== "undefined") {
-      if (typeof crypto.randomUUID === "function") {
-        try {
-          return crypto.randomUUID();
-        } catch (_) {
-          /* noop */
-        }
-      }
-      if (typeof crypto.getRandomValues === "function") {
-        const bytes = new Uint8Array(16);
-        crypto.getRandomValues(bytes);
-        bytes[6] = (bytes[6] & 0x0f) | 0x40;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
-        return (
-          `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-` +
-          `${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`
-        );
+  let activeAbortController = null;
+  let inMemoryMessages = [];
+  function newSessionId() {
+    if (typeof window !== "undefined" && window.crypto && typeof crypto.randomUUID === "function") {
+      try {
+        return crypto.randomUUID();
+      } catch (_) {
+        /* noop */
       }
     }
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
-      const rand = Math.floor(Math.random() * 16);
-      const value = char === "x" ? rand : (rand & 0x3) | 0x8;
-      return value.toString(16);
-    });
+
+    return "sid_" + Date.now() + "_" + Math.random().toString(16).slice(2);
+  }
+
+  function getSessionId() {
+    try {
+      return window.localStorage.getItem(SESSION_KEY) || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function setSessionId(id) {
+    memorySessionId = (id || "").trim();
+    try {
+      window.localStorage.setItem(SESSION_KEY, memorySessionId);
+    } catch (_) {
+      /* noop */
+    }
+    return memorySessionId;
   }
 
   function ensureSessionId() {
     if (memorySessionId) {
       return memorySessionId;
     }
-    let existing = "";
-    try {
-      existing = window.localStorage.getItem(SESSION_KEY) || "";
-    } catch (_) {
-      existing = "";
+    const existing = getSessionId();
+    if (existing) {
+      memorySessionId = existing;
+      return existing;
     }
-    if (existing && existing.trim()) {
-      memorySessionId = existing.trim();
-      return memorySessionId;
-    }
-    const fresh = createUuid();
-    memorySessionId = fresh;
-    try {
-      window.localStorage.setItem(SESSION_KEY, fresh);
-    } catch (_) {
-      /* noop */
-    }
+    const fresh = newSessionId();
+    setSessionId(fresh);
     return fresh;
+  }
+
+  function resetSessionId() {
+    const sid = newSessionId();
+    setSessionId(sid);
+    return sid;
   }
 
   function safeJsonParse(text) {
@@ -151,8 +150,9 @@
   }
 
   const ENDPOINT = resolveEndpoint();
-  const sessionId = ensureSessionId();
+  ensureSessionId();
   const history = loadHistory();
+  inMemoryMessages = Array.isArray(history) ? [...history] : [];
 
   // ===== Авто-рост iframe =====
 
@@ -334,13 +334,8 @@
   }
 
   function persistHistory() {
-    const messages = Array.from(elements.scroll.querySelectorAll(".u4s-msg")).map((node) => ({
-      role: node.dataset.role === "me" ? "me" : "bot",
-      text: node.dataset.raw || node.textContent || "",
-      timestamp: node.dataset.timestamp || undefined,
-    }));
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(inMemoryMessages));
     } catch (_) {
       /* noop */
     }
@@ -348,10 +343,9 @@
   }
 
   function collectHistory(limit) {
-    const nodes = Array.from(elements.scroll.querySelectorAll(".u4s-msg"));
-    const items = nodes.map((node) => ({
-      role: node.dataset.role === "me" ? "user" : "assistant",
-      text: node.dataset.raw || node.textContent || "",
+    const items = inMemoryMessages.map((message) => ({
+      role: message.role === "me" ? "user" : "assistant",
+      text: message.text,
     }));
     if (typeof limit === "number" && Number.isFinite(limit)) {
       const normalized = Math.max(0, Math.floor(limit));
@@ -361,11 +355,13 @@
   }
 
   function clearChatHistory() {
+    inMemoryMessages = [];
     elements.scroll.replaceChildren();
     persistHistory();
   }
 
   function restoreHistory(messages) {
+    inMemoryMessages = Array.isArray(messages) ? messages.filter((message) => typeof message?.text === "string") : [];
     elements.scroll.replaceChildren();
     if (Array.isArray(messages)) {
       messages.forEach((message) => {
@@ -381,13 +377,55 @@
   }
 
   function appendBotMessage(text) {
-    renderMessage({ role: "bot", text });
+    const node = renderMessage({ role: "bot", text });
+    const timestamp = node?.dataset?.timestamp || createTimeStamp();
+    inMemoryMessages.push({ role: "bot", text, timestamp });
     persistHistory();
   }
 
   function appendUserMessage(text) {
-    renderMessage({ role: "me", text });
+    const node = renderMessage({ role: "me", text });
+    const timestamp = node?.dataset?.timestamp || createTimeStamp();
+    inMemoryMessages.push({ role: "me", text, timestamp });
     persistHistory();
+  }
+
+  function resetChat() {
+    try {
+      activeAbortController?.abort();
+    } catch (_) {
+      /* noop */
+    }
+    activeAbortController = null;
+
+    resetSessionId();
+
+    inMemoryMessages = [];
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch (_) {
+      /* noop */
+    }
+    try {
+      window.sessionStorage.removeItem(STORAGE_KEY);
+    } catch (_) {
+      /* noop */
+    }
+
+    elements.scroll.replaceChildren();
+    const typingNodes = doc.querySelectorAll(".u4s-typing");
+    typingNodes.forEach((node) => {
+      if (node && node.parentNode) {
+        node.parentNode.removeChild(node);
+      }
+    });
+
+    if (elements.input) {
+      elements.input.value = "";
+      elements.input.focus();
+    }
+
+    appendBotMessage(INITIAL_GREETING);
   }
 
   // восстановление истории
@@ -433,7 +471,10 @@
     elements.input.focus();
 
     const typingNode = renderTyping();
-    const payload = { message: text, question: text, sessionId };
+    const controller = new AbortController();
+    activeAbortController = controller;
+    const requestSessionId = ensureSessionId();
+    const payload = { message: text, question: text, sessionId: requestSessionId };
     const recentHistory = collectHistory(4);
     if (recentHistory.length > 0) {
       payload.history = recentHistory;
@@ -443,6 +484,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -450,59 +492,37 @@
       }
 
       const data = await response.json().catch(() => ({}));
+      if (requestSessionId !== getSessionId()) {
+        removeTyping(typingNode);
+        return;
+      }
+
       removeTyping(typingNode);
 
       const answer = [data?.answer, data?.message, data?.response].find((value) => typeof value === "string")
         || "Извините, сейчас не могу ответить. Попробуйте позже.";
       appendBotMessage(answer);
     } catch (error) {
-      removeTyping(typingNode);
-      appendBotMessage(CONNECTION_ERROR_MESSAGE);
-      console.error("U4S widget fetch error", error);
-    }
-  });
-
-  elements.reset.addEventListener("click", async () => {
-    if (elements.reset.disabled) return;
-    elements.reset.disabled = true;
-
-    const previousMessages = loadHistory();
-    const lastKnownHistory = Array.isArray(previousMessages)
-      ? previousMessages.slice(-4).map((message) => ({
-          role: message?.role === "me" ? "user" : "assistant",
-          text: typeof message?.text === "string" ? message.text : "",
-        }))
-      : [];
-
-    clearChatHistory();
-    const typingNode = renderTyping();
-
-    const resetPayload = { reset: true, action: "reset", sessionId, message: "" };
-    if (lastKnownHistory.length > 0) {
-      resetPayload.history = lastKnownHistory;
-    }
-
-    try {
-      const response = await fetch(ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(resetPayload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      if (error?.name === "AbortError") {
+        removeTyping(typingNode);
+        return;
       }
 
       removeTyping(typingNode);
-      appendBotMessage(INITIAL_GREETING);
-    } catch (error) {
-      removeTyping(typingNode);
-      restoreHistory(previousMessages);
-      appendBotMessage(RESET_ERROR_MESSAGE);
-      console.error("U4S widget reset error", error);
+      appendBotMessage(CONNECTION_ERROR_MESSAGE);
+      console.error("U4S widget fetch error", error);
     } finally {
-      elements.reset.disabled = false;
+      if (activeAbortController === controller) {
+        activeAbortController = null;
+      }
     }
+  });
+
+  doc.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-action='reset-chat'], #u4s-reset, .reset-chat-btn");
+    if (!btn) return;
+    event.preventDefault();
+    resetChat();
   });
 
   function autoOpenFromQuery() {
