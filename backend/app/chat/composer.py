@@ -17,6 +17,7 @@ from app.chat.formatting import (
     postprocess_answer,
 )
 from app.booking.parsers import (
+    extract_guests,
     parse_adults,
     parse_checkin,
     parse_children_ages,
@@ -281,9 +282,16 @@ class ChatComposer:
             adults = parse_adults(text, allow_general_numbers=allow_general_adults)
             if adults is not None:
                 context.adults = adults
-        if context.children is None:
+        if context.children is None and context.state in {
+            BookingState.ASK_CHILDREN_COUNT,
+            BookingState.ASK_CHILDREN_AGES,
+        }:
             context.children = parse_children_count(text)
-        if (context.children or 0) > 0 and not context.children_ages:
+        if (
+            (context.children or 0) > 0
+            and not context.children_ages
+            and context.state == BookingState.ASK_CHILDREN_AGES
+        ):
             context.children_ages = parse_children_ages(text, expected=context.children)
         if context.room_type is None:
             context.room_type = parse_room_type(text)
@@ -291,17 +299,6 @@ class ChatComposer:
     def _ask_with_retry(self, context: BookingContext, state: BookingState, question: str) -> str:
         attempts = context.retries.get(state.value, 0) + 1
         context.retries[state.value] = attempts
-        if attempts >= self._max_state_attempts:
-            context.retries.clear()
-            context.state = BookingState.ASK_CHECKIN
-            context.checkin = None
-            context.checkout = None
-            context.nights = None
-            context.adults = None
-            context.children = None
-            context.children_ages = []
-            context.room_type = None
-            return "Давайте начнём заново. На какую дату планируете заезд?"
         return self._booking_prompt(question, context)
 
     def _go_back(self, context: BookingContext) -> None:
@@ -405,7 +402,24 @@ class ChatComposer:
 
             if state == BookingState.ASK_ADULTS:
                 context.state = BookingState.ASK_ADULTS
+                guests_from_text = extract_guests(text)
+                adults_from_text = guests_from_text.get("adults")
+                children_from_text = guests_from_text.get("children")
+                if adults_from_text is not None:
+                    context.adults = adults_from_text
+                if children_from_text is not None:
+                    context.children = children_from_text
+                    if children_from_text <= 0:
+                        context.children_ages = []
+
                 if context.adults is not None:
+                    context.state = BookingState.ASK_CHILDREN_COUNT
+                    if context.children is None and children_from_text is None:
+                        return self._ask_with_retry(
+                            context,
+                            BookingState.ASK_CHILDREN_COUNT,
+                            "Сколько детей? Если детей нет — напишите 0.",
+                        )
                     state = BookingState.ASK_CHILDREN_COUNT
                     continue
                 allow_general = "nights" not in consumed_fields
@@ -413,16 +427,48 @@ class ChatComposer:
                 if adults is not None:
                     context.adults = adults
                     consumed_fields.add("adults")
-                    state = BookingState.ASK_CHILDREN_COUNT
                     context.state = BookingState.ASK_CHILDREN_COUNT
+                    if context.children is None:
+                        return self._ask_with_retry(
+                            context,
+                            BookingState.ASK_CHILDREN_COUNT,
+                            "Сколько детей? Если детей нет — напишите 0.",
+                        )
+                    state = BookingState.ASK_CHILDREN_COUNT
                     continue
                 return self._ask_with_retry(context, BookingState.ASK_ADULTS, "Сколько взрослых едет?")
 
             if state == BookingState.ASK_CHILDREN_COUNT:
                 context.state = BookingState.ASK_CHILDREN_COUNT
+                guests_from_text = extract_guests(text)
+                children_from_text = guests_from_text.get("children")
+                adults_from_text = guests_from_text.get("adults")
+                if adults_from_text is not None:
+                    context.adults = adults_from_text
+                if children_from_text is not None:
+                    context.children = children_from_text
+                    if children_from_text <= 0:
+                        context.children_ages = []
+
+                lowered_input = text.lower()
                 if context.children is not None:
                     if (context.children or 0) > 0:
-                        state = BookingState.ASK_CHILDREN_AGES
+                        if context.children_ages and len(context.children_ages) == context.children:
+                            state = BookingState.ASK_ROOM_TYPE
+                            continue
+                        if "взросл" not in lowered_input:
+                            ages = parse_children_ages(text, expected=context.children)
+                            if ages:
+                                context.children_ages = ages
+                                state = BookingState.ASK_ROOM_TYPE
+                                context.state = BookingState.ASK_ROOM_TYPE
+                                continue
+                        context.state = BookingState.ASK_CHILDREN_AGES
+                        return self._ask_with_retry(
+                            context,
+                            BookingState.ASK_CHILDREN_AGES,
+                            "Уточните возраст детей (через запятую).",
+                        )
                     else:
                         if context.room_type is None:
                             context.room_type = "Студия"
@@ -432,15 +478,22 @@ class ChatComposer:
                 if children is not None:
                     context.children = children
                     if children > 0:
-                        state = BookingState.ASK_CHILDREN_AGES
                         context.state = BookingState.ASK_CHILDREN_AGES
-                    else:
-                        if context.room_type is None:
-                            context.room_type = "Студия"
-                        state = BookingState.CALCULATE
-                        context.state = BookingState.CALCULATE
+                        return self._ask_with_retry(
+                            context,
+                            BookingState.ASK_CHILDREN_AGES,
+                            "Уточните возраст детей (через запятую).",
+                        )
+                    if context.room_type is None:
+                        context.room_type = "Студия"
+                    state = BookingState.CALCULATE
+                    context.state = BookingState.CALCULATE
                     continue
-                return self._ask_with_retry(context, BookingState.ASK_CHILDREN_COUNT, "Будут ли дети? Укажите число или 'нет'.")
+                return self._ask_with_retry(
+                    context,
+                    BookingState.ASK_CHILDREN_COUNT,
+                    "Сколько детей? Если детей нет — напишите 0.",
+                )
 
             if state == BookingState.ASK_CHILDREN_AGES:
                 context.state = BookingState.ASK_CHILDREN_AGES
@@ -629,7 +682,18 @@ class ChatComposer:
         )
 
     def _is_cancel_command(self, normalized: str) -> bool:
-        return normalized in {"отмена", "отменить", "стоп", "cancel", "отмени"}
+        return normalized in {
+            "отмена",
+            "отменить",
+            "стоп",
+            "cancel",
+            "отмени",
+            "начать заново",
+            "начнём заново",
+            "начнем заново",
+            "сброс",
+            "сбросить",
+        }
 
     def _is_back_command(self, normalized: str) -> bool:
         return normalized in {"назад", "вернись", "вернуться"}
@@ -657,7 +721,7 @@ class ChatComposer:
             "checkin": "На какую дату планируете заезд?",
             "checkout_or_nights": "Сколько ночей остаётесь или до какого числа?",
             "adults": "Сколько взрослых едет?",
-            "children": "Будут дети?",
+            "children": "Сколько детей? Если детей нет — напишите 0.",
             "children_ages": "Уточните возраст детей (через запятую).",
             "room_type": "Какой тип размещения выбрать: Студия, Шале, Шале Комфорт или Семейный номер?",
         }
@@ -732,7 +796,7 @@ class ChatComposer:
             "check_in": "На какую дату заезд?",
             "check_out": "До какого числа остаетесь?",
             "adults": "Сколько будет взрослых?",
-            "children": "Будут дети?",
+            "children": "Сколько детей? Если детей нет — напишите 0.",
         }
         parts: list[str] = []
         if summary:

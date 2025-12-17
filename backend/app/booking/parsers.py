@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from typing import Optional
 
 from app.booking.slot_filling import (
     AGE_BLOCK_PATTERNS,
@@ -20,6 +21,105 @@ from app.booking.slot_filling import (
 
 
 _slot_filler = SlotFiller()
+
+
+_ZERO_TOKENS = {
+    "0",
+    "нет",
+    "не будет",
+    "без",
+    "без детей",
+    "без ребенка",
+    "без ребёнка",
+    "нет детей",
+}
+
+_NUMBER_WORDS: dict[int, set[str]] = {
+    0: {"ноль", "нуль"},
+    1: {"один", "одна", "одно", "одного", "одной"},
+    2: {"два", "две", "двое", "двух"},
+    3: {"три", "трое", "трех", "трёх"},
+    4: {"четыре", "четверо", "четырех", "четырёх"},
+    5: {"пять", "пятеро", "пяти"},
+    6: {"шесть", "шестерых", "шести"},
+    7: {"семь", "семерых", "семи"},
+    8: {"восемь", "восьмерых", "восьми"},
+    9: {"девять", "девятерых", "девяти"},
+    10: {"десять", "десятерых", "десяти"},
+}
+
+
+def normalize_int(text: str) -> Optional[int]:
+    if not text:
+        return None
+
+    lowered = text.strip().lower()
+    if lowered in _ZERO_TOKENS:
+        return 0
+
+    digit_match = re.search(r"\d+", lowered)
+    if digit_match:
+        try:
+            return int(digit_match.group())
+        except ValueError:
+            return None
+
+    for value, variants in _NUMBER_WORDS.items():
+        for variant in variants:
+            if re.search(rf"\b{re.escape(variant)}\b", lowered):
+                return value
+
+    mapped = RUS_NUMBER_WORDS.get(lowered)
+    if mapped is not None:
+        return mapped
+
+    return None
+
+
+def extract_guests(text: str) -> dict[str, int]:
+    lowered = text.strip().lower()
+    result: dict[str, int] = {}
+
+    plus_match = re.search(
+        r"(?P<adults>[\w-]+)\s*\+\s*(?P<children>[\w-]+)", lowered
+    )
+    if plus_match:
+        adults = normalize_int(plus_match.group("adults"))
+        children = normalize_int(plus_match.group("children"))
+        if adults is not None:
+            result["adults"] = adults
+        if children is not None:
+            result["children"] = children
+        return result
+
+    for pattern, field in (
+        (re.compile(r"(?P<value>(?:\d+|[а-яё-]+))\s*(?:взросл\w*|adult\w*)"), "adults"),
+        (
+            re.compile(
+                r"(?:взросл\w*|adult\w*)[^\dа-яё]*(?P<value>(?:\d+|[а-яё-]+))"
+            ),
+            "adults",
+        ),
+        (
+            re.compile(
+                r"(?P<value>(?:\d+|[а-яё-]+))\s*(?:дет(?:ей|и)|реб(?:е|ё)н(?:ок|ка)?|child\w*|kid\w*)"
+            ),
+            "children",
+        ),
+        (
+            re.compile(
+                r"(?:дет(?:ей|и)|реб(?:е|ё)н(?:ок|ка)?|child\w*|kid\w*)[^\dа-яё]*(?P<value>(?:\d+|[а-яё-]+))"
+            ),
+            "children",
+        ),
+    ):
+        match = pattern.search(lowered)
+        if match:
+            value = normalize_int(match.group("value"))
+            if value is not None:
+                result[field] = value
+
+    return result
 
 
 def parse_checkin(text: str, now_date: date | None = None) -> str | None:
@@ -60,10 +160,17 @@ def parse_adults(text: str, *, allow_general_numbers: bool = True) -> int | None
 
 def parse_children_count(text: str) -> int | None:
     lowered = text.strip().lower()
-    if lowered in {"нет", "не будет", "без детей", "нет детей", "0"}:
-        return 0
     if lowered in {"да", "будут", "есть"}:
         return None
+
+    if lowered in _ZERO_TOKENS:
+        return 0
+
+    if re.fullmatch(rf"(\d+|{NUMBER_WORD_PATTERN})", lowered):
+        normalized = normalize_int(lowered)
+        if normalized is not None:
+            return normalized
+
     children = _slot_filler._extract_first_number(lowered, CHILDREN_PATTERNS)  # noqa: SLF001
     return children
 
@@ -96,15 +203,7 @@ def _split_ages(block: str) -> list[int]:
 
 
 def _parse_number_token(token: str | None) -> int | None:
-    if not token:
-        return None
-    normalized = token.strip().lower()
-    if normalized.isdigit():
-        try:
-            return int(normalized)
-        except ValueError:
-            return None
-    return RUS_NUMBER_WORDS.get(normalized)
+    return normalize_int(token or "")
 
 
 def _extract_dates_with_future(text: str, today: date) -> list[date]:
@@ -182,4 +281,6 @@ __all__ = [
     "parse_children_count",
     "parse_children_ages",
     "parse_room_type",
+    "normalize_int",
+    "extract_guests",
 ]
