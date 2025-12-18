@@ -242,3 +242,105 @@ def test_reset_happens_only_on_explicit_command(booking_fsm_env):
     cancel_response = send("начать заново")
     assert "отменяю бронирование" in cancel_response["answer"].lower()
     assert fsm_store.get("fsm") is None
+
+
+def test_is_general_question_detects_service_questions():
+    """Тест детектора общих вопросов об услугах."""
+    from app.services.booking_fsm_service import BookingFsmService
+    from app.services.response_formatting_service import ResponseFormattingService
+    
+    fsm_service = BookingFsmService(
+        booking_service=None,  # type: ignore[arg-type]
+        formatting_service=ResponseFormattingService(),
+    )
+    
+    # Вопросы об услугах — должны определяться как общие
+    general_questions = [
+        "можно заказать еду в номер?",
+        "а есть баня?",
+        "бассейн есть?",
+        "есть ли wi-fi?",
+        "можно ли с собакой?",
+        "какие экскурсии предлагаете?",
+        "расскажи про завтраки",
+        "подскажи время заезда",
+        "во сколько расчётный час?",
+        "парковка есть?",
+    ]
+    
+    for question in general_questions:
+        assert fsm_service.is_general_question(question), f"Должен определяться как общий: {question}"
+    
+    # Booking-related сообщения — НЕ общие вопросы
+    booking_messages = [
+        "да",
+        "нет",
+        "семейный",
+        "студия",
+        "забронировать",
+        "покажи все",
+        "изменить даты",
+    ]
+    
+    for msg in booking_messages:
+        assert not fsm_service.is_general_question(msg), f"НЕ должен определяться как общий: {msg}"
+
+
+def test_general_question_in_awaiting_state_returns_delegation_marker(booking_fsm_env):
+    """Тест: общий вопрос в состоянии AWAITING_USER_DECISION возвращает маркер делегирования."""
+    composer, _booking_service, make_entities, fsm_store = booking_fsm_env
+    
+    def send(message: str):
+        entities = make_entities(message)
+        return asyncio.run(composer.handle_booking_calculation("fsm-general", message, entities))
+    
+    # Проходим полный флоу до показа результатов
+    send("хочу рассчитать")
+    send("19 декабря")
+    send("2")
+    send("2")
+    send("нет")  # Должны получить расчёт и перейти в AWAITING_USER_DECISION
+    
+    context = BookingContext.from_dict(fsm_store.get("fsm-general"))
+    assert context
+    assert context.state == BookingState.AWAITING_USER_DECISION
+    
+    # Теперь задаём общий вопрос — должен вернуться маркер делегирования
+    # Но так как у нас нет LLM/Qdrant моков, ответ не сможет быть получен
+    # Проверяем только что контекст сохраняется
+    
+    # Проверяем через BookingFsmService напрямую
+    from app.services.booking_fsm_service import BookingFsmService
+    from app.services.response_formatting_service import ResponseFormattingService
+    from app.services.parsing_service import ParsingService
+    from app.booking.slot_filling import SlotFiller
+    
+    fsm_service = BookingFsmService(
+        booking_service=None,  # type: ignore[arg-type]
+        formatting_service=ResponseFormattingService(),
+    )
+    parsing_service = ParsingService(SlotFiller())
+    
+    # Создаём контекст в состоянии AWAITING_USER_DECISION
+    context = BookingContext(
+        checkin="2024-12-19",
+        checkout="2024-12-21",
+        nights=2,
+        adults=2,
+        children=0,
+        state=BookingState.AWAITING_USER_DECISION
+    )
+    
+    parsers = parsing_service.create_parsers("а есть баня?")
+    debug = {}
+    
+    result = asyncio.run(fsm_service.process_message(
+        "test-session", "а есть баня?", context, parsers, debug
+    ))
+    
+    # Должен вернуться маркер делегирования
+    assert result.startswith("__DELEGATE_TO_GENERAL__")
+    assert "баня" in result
+    
+    # Контекст должен остаться в AWAITING_USER_DECISION
+    assert context.state == BookingState.AWAITING_USER_DECISION

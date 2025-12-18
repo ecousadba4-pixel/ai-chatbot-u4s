@@ -191,6 +191,40 @@ class ChatComposer:
             session_id, text, context, parsers, debug
         )
         
+        # Проверяем, нужно ли делегировать в RAG (общий вопрос в режиме бронирования)
+        if answer.startswith("__DELEGATE_TO_GENERAL__"):
+            original_question = answer[len("__DELEGATE_TO_GENERAL__"):]
+            
+            # Сохраняем контекст бронирования (не меняем состояние!)
+            context_dict = self._booking_fsm_service.save_context(context)
+            if hasattr(self._booking_store, 'set_async'):
+                await self._booking_store.set_async(session_id, context_dict)
+            else:
+                self._booking_store.set(session_id, context_dict)
+            
+            # Получаем ответ через RAG
+            rag_result = await self.handle_general(
+                original_question, 
+                intent="general", 
+                session_id=session_id
+            )
+            rag_answer = rag_result.get("answer", "")
+            rag_debug = rag_result.get("debug", {})
+            
+            # Добавляем мягкое напоминание о бронировании
+            booking_reminder = (
+                "\n\n💡 Кстати, ваш расчёт бронирования сохранён. "
+                "Можете продолжить выбор номера или изменить даты."
+            )
+            final_answer = rag_answer + booking_reminder
+            
+            # Объединяем debug информацию
+            debug["delegated_to_rag"] = True
+            debug["original_question"] = original_question
+            debug.update({f"rag_{k}": v for k, v in rag_debug.items()})
+            
+            return {"answer": final_answer, "debug": debug}
+        
         # Сохраняем или очищаем контекст в зависимости от состояния
         if context.state == BookingState.CANCELLED:
             # При отмене очищаем контекст полностью
@@ -561,69 +595,8 @@ class ChatComposer:
     def _handle_post_quote_decision(
         self, text: str, context: BookingContext, parsers: ParsedMessageCache
     ) -> str:
-        normalized = text.strip().lower()
-        room_type = parsers.room_type()
-        booking_intent = any(
-            token in normalized
-            for token in {
-                "забронировать",
-                "бронировать",
-                "оформляй",
-                "оформляем",
-                "оформляю",
-                "берем",
-                "берём",
-                "возьми",
-            }
-        )
-
-        if room_type:
-            context.room_type = room_type
-
-        if booking_intent or room_type:
-            context.state = BookingState.DONE
-            selection = f"Вы выбрали тип: {context.room_type}." if context.room_type else ""
-            note = (
-                "Я показываю цены и варианты. Оформить бронь можно по ссылке "
-                "https://usadba4.ru/bronirovanie/."
-            )
-            return " ".join(filter(None, [selection, note, "Если нужно изменить даты, скажите 'начнём заново'."]))
-
-        # Обработка запроса "покажи все" / "покажи больше вариантов"
-        show_more_triggers = {
-            "покажи все",
-            "покажи всё",
-            "показать все",
-            "показать всё",
-            "покажи больше",
-            "показать больше",
-            "ещё варианты",
-            "еще варианты",
-            "другие варианты",
-            "остальные",
-            "все варианты",
-        }
-        if any(trigger in normalized for trigger in show_more_triggers):
-            return self._show_more_offers(context)
-
-        if "дат" in normalized:
-            context.state = BookingState.ASK_CHECKIN
-            context.checkin = None
-            context.checkout = None
-            context.nights = None
-            return self._booking_prompt("Изменим даты. На какую дату планируете заезд?", context)
-        if "гост" in normalized or "люд" in normalized:
-            context.state = BookingState.ASK_ADULTS
-            context.adults = None
-            context.children = None
-            context.children_ages = []
-            return self._booking_prompt("Сколько взрослых едет?", context)
-
-        context.state = BookingState.AWAITING_USER_DECISION
-        return (
-            "Если хотите изменить параметры, напишите новые даты или количество гостей. "
-            "Чтобы забронировать, воспользуйтесь ссылкой https://usadba4.ru/bronirovanie/."
-        )
+        # Делегируем в BookingFsmService для единообразной обработки
+        return self._booking_fsm_service._handle_post_quote_decision(text, context, parsers)
 
     def _show_more_offers(self, context: BookingContext) -> str:
         """Показывает оставшиеся офферы из сохранённого списка."""
