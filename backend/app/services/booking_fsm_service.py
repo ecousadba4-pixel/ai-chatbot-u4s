@@ -32,6 +32,23 @@ class BookingFsmService:
         context = BookingContext.from_dict(context_dict)
         if context is None:
             return initial_booking_context()
+        
+        # Валидация загруженного контекста: если состояние требует checkin, но его нет,
+        # возвращаемся к начальному состоянию
+        if context.state in {
+            BookingState.ASK_NIGHTS_OR_CHECKOUT,
+            BookingState.ASK_ADULTS,
+            BookingState.ASK_CHILDREN_COUNT,
+            BookingState.ASK_CHILDREN_AGES,
+            BookingState.CALCULATE,
+        }:
+            if not context.checkin:
+                logger.warning(
+                    "Loaded context in state %s without checkin, resetting to ASK_CHECKIN. "
+                    "Context dict: %s", context.state, context_dict
+                )
+                context = initial_booking_context()
+        
         return context
 
     def save_context(self, context: BookingContext) -> dict[str, Any]:
@@ -116,6 +133,24 @@ class BookingFsmService:
         if self.is_back_command(normalized):
             self.go_back(context)
 
+        # КРИТИЧНО: валидация контекста перед обработкой
+        # Если состояние требует checkin, но его нет, возвращаемся к начальному состоянию
+        if context.state in {
+            BookingState.ASK_NIGHTS_OR_CHECKOUT,
+            BookingState.ASK_ADULTS,
+            BookingState.ASK_CHILDREN_COUNT,
+            BookingState.ASK_CHILDREN_AGES,
+            BookingState.CALCULATE,
+        }:
+            if not context.checkin:
+                logger.warning(
+                    "Context validation failed: state %s requires checkin but it's missing. "
+                    "Resetting to ASK_CHECKIN. Context: %s",
+                    context.state,
+                    context.compact(),
+                )
+                context.state = BookingState.ASK_CHECKIN
+
         logger.info(
             "BOOKING_FSM state=%s ctx=%s message=%s",
             context.state,
@@ -160,6 +195,17 @@ class BookingFsmService:
 
             if state == BookingState.ASK_NIGHTS_OR_CHECKOUT:
                 context.state = BookingState.ASK_NIGHTS_OR_CHECKOUT
+                # КРИТИЧНО: проверяем наличие checkin перед обработкой
+                # Если checkin потерялся, возвращаемся к запросу даты заезда
+                if not context.checkin:
+                    logger.warning(
+                        "Lost checkin date in ASK_NIGHTS_OR_CHECKOUT state, returning to ASK_CHECKIN. "
+                        "Context: %s", context.compact()
+                    )
+                    context.state = BookingState.ASK_CHECKIN
+                    state = BookingState.ASK_CHECKIN
+                    continue
+                
                 if context.nights is not None or context.checkout:
                     state = BookingState.ASK_ADULTS
                     continue
@@ -169,6 +215,15 @@ class BookingFsmService:
                     checkin_date = date.fromisoformat(context.checkin) if context.checkin else None
                 except ValueError:
                     checkin_date = None
+                    # Если checkin невалидный, возвращаемся к запросу даты
+                    logger.warning(
+                        "Invalid checkin date format in ASK_NIGHTS_OR_CHECKOUT: %s", context.checkin
+                    )
+                    context.checkin = None
+                    context.state = BookingState.ASK_CHECKIN
+                    state = BookingState.ASK_CHECKIN
+                    continue
+                
                 if checkin_date:
                     parsed_checkout = parsers.checkin(now_date=checkin_date)
                     if parsed_checkout:
@@ -181,11 +236,27 @@ class BookingFsmService:
                 if nights:
                     context.nights = nights
                     consumed_fields.add("nights")
+                    # Перед переходом к следующему состоянию убеждаемся, что checkin сохранен
+                    if not context.checkin:
+                        logger.warning(
+                            "Lost checkin date after extracting nights, returning to ASK_CHECKIN"
+                        )
+                        context.state = BookingState.ASK_CHECKIN
+                        state = BookingState.ASK_CHECKIN
+                        continue
                     state = BookingState.ASK_ADULTS
                     context.state = BookingState.ASK_ADULTS
                     continue
                 if checkout_value:
                     context.checkout = checkout_value
+                    # Перед переходом к следующему состоянию убеждаемся, что checkin сохранен
+                    if not context.checkin:
+                        logger.warning(
+                            "Lost checkin date after extracting checkout, returning to ASK_CHECKIN"
+                        )
+                        context.state = BookingState.ASK_CHECKIN
+                        state = BookingState.ASK_CHECKIN
+                        continue
                     state = BookingState.ASK_ADULTS
                     context.state = BookingState.ASK_ADULTS
                     continue
@@ -197,6 +268,16 @@ class BookingFsmService:
 
             if state == BookingState.ASK_ADULTS:
                 context.state = BookingState.ASK_ADULTS
+                # КРИТИЧНО: проверяем наличие checkin перед обработкой
+                if not context.checkin:
+                    logger.warning(
+                        "Lost checkin date in ASK_ADULTS state, returning to ASK_CHECKIN. "
+                        "Context: %s", context.compact()
+                    )
+                    context.state = BookingState.ASK_CHECKIN
+                    state = BookingState.ASK_CHECKIN
+                    continue
+                
                 guests_from_text = parsers.guests()
                 adults_from_text = guests_from_text.get("adults")
                 children_from_text = guests_from_text.get("children")
