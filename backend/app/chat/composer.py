@@ -170,6 +170,14 @@ class ChatComposer:
             or entities.children is not None
         )
 
+    async def _advance_booking_fsm(
+        self,
+        session_id: str,
+        context: BookingContext,
+        text: str,
+        debug: dict[str, Any],
+        parsers: ParsedMessageCache,
+    ) -> str:
         state = context.state or BookingState.ASK_CHECKIN
         consumed_fields: set[str] = set()
         if context.nights is not None:
