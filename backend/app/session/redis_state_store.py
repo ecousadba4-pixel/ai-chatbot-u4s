@@ -45,44 +45,79 @@ class RedisConversationStateStore:
     # === Состояние бронирования ===
 
     def get(self, session_id: str) -> dict[str, Any] | SlotState | None:
-        """Синхронный интерфейс для совместимости с ConversationStateStore."""
+        """
+        Синхронный интерфейс для совместимости с ConversationStateStore.
+        
+        ВАЖНО: Этот метод НЕ должен использоваться из async кода!
+        Используйте get_async() напрямую в async контексте.
+        """
         import asyncio
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
+            # Если мы в async контексте - это ошибка использования!
+            logger.error(
+                "RedisConversationStateStore.get() called from async context! "
+                "Use get_async() instead. session_id=%s",
+                session_id
+            )
+            return None
         except RuntimeError:
+            # Нет running loop - можем безопасно создать новый
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(self.get_async(session_id))
-        
-        # Если уже в async контексте, создаём task
-        future = asyncio.ensure_future(self.get_async(session_id))
-        return None  # Fallback - в async коде используйте get_async
+            try:
+                return loop.run_until_complete(self.get_async(session_id))
+            finally:
+                loop.close()
 
     def set(self, session_id: str, state: dict[str, Any] | SlotState) -> None:
-        """Синхронный интерфейс для совместимости с ConversationStateStore."""
+        """
+        Синхронный интерфейс для совместимости с ConversationStateStore.
+        
+        ВАЖНО: Этот метод НЕ должен использоваться из async кода!
+        Используйте set_async() напрямую в async контексте.
+        """
         import asyncio
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.set_async(session_id, state))
+            asyncio.get_running_loop()
+            # Если мы в async контексте - это ошибка использования!
+            logger.error(
+                "RedisConversationStateStore.set() called from async context! "
+                "Use set_async() instead. session_id=%s",
+                session_id
+            )
             return
-        
-        asyncio.ensure_future(self.set_async(session_id, state))
+        except RuntimeError:
+            # Нет running loop - можем безопасно создать новый
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self.set_async(session_id, state))
+            finally:
+                loop.close()
 
     def clear(self, session_id: str) -> None:
-        """Синхронный интерфейс для совместимости с ConversationStateStore."""
+        """
+        Синхронный интерфейс для совместимости с ConversationStateStore.
+        
+        ВАЖНО: Этот метод НЕ должен использоваться из async кода!
+        Используйте clear_async() напрямую в async контексте.
+        """
         import asyncio
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.clear_async(session_id))
+            asyncio.get_running_loop()
+            # Если мы в async контексте - это ошибка использования!
+            logger.error(
+                "RedisConversationStateStore.clear() called from async context! "
+                "Use clear_async() instead. session_id=%s",
+                session_id
+            )
             return
-        
-        asyncio.ensure_future(self.clear_async(session_id))
+        except RuntimeError:
+            # Нет running loop - можем безопасно создать новый
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self.clear_async(session_id))
+            finally:
+                loop.close()
 
     async def get_async(self, session_id: str) -> dict[str, Any] | None:
         """Асинхронное получение состояния."""

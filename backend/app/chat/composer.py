@@ -91,10 +91,16 @@ class ChatComposer:
             max_state_attempts=max_state_attempts,
         )
 
-    def has_active_booking(
+    async def has_active_booking(
         self, session_id: str, entities: BookingEntities | None = None
     ) -> bool:
-        booking_context = BookingContext.from_dict(self._booking_store.get(session_id))
+        # Загружаем контекст - используем async метод если доступен
+        if hasattr(self._booking_store, 'get_async'):
+            booking_context_dict = await self._booking_store.get_async(session_id)
+        else:
+            booking_context_dict = self._booking_store.get(session_id)
+        
+        booking_context = BookingContext.from_dict(booking_context_dict)
         if booking_context and booking_context.state not in (
             BookingState.DONE,
             BookingState.CANCELLED,
@@ -102,7 +108,12 @@ class ChatComposer:
         ):
             return True
 
-        state = self._store.get(session_id)
+        # Для SlotState store тоже используем async если доступен
+        if hasattr(self._store, 'get_async'):
+            state = await self._store.get_async(session_id)
+        else:
+            state = self._store.get(session_id)
+        
         if isinstance(state, SlotState) and self._has_booking_context(state):
             return True
         if entities and self._entities_have_booking_data(entities):
@@ -113,8 +124,11 @@ class ChatComposer:
         self, session_id: str, text: str, entities: BookingEntities
     ) -> dict[str, Any]:
         """Обрабатывает расчёт бронирования через FSM."""
-        # Загружаем контекст
-        context_dict = self._booking_store.get(session_id)
+        # Загружаем контекст - используем async метод если доступен
+        if hasattr(self._booking_store, 'get_async'):
+            context_dict = await self._booking_store.get_async(session_id)
+        else:
+            context_dict = self._booking_store.get(session_id)
         context = self._booking_fsm_service.load_context(context_dict)
         
         # КРИТИЧНО: логируем состояние до применения сущностей для диагностики
@@ -177,9 +191,20 @@ class ChatComposer:
             session_id, text, context, parsers, debug
         )
         
-        # Сохраняем контекст
-        context_dict = self._booking_fsm_service.save_context(context)
-        self._booking_store.set(session_id, context_dict)
+        # Сохраняем или очищаем контекст в зависимости от состояния
+        if context.state == BookingState.CANCELLED:
+            # При отмене очищаем контекст полностью
+            if hasattr(self._booking_store, 'clear_async'):
+                await self._booking_store.clear_async(session_id)
+            else:
+                self._booking_store.clear(session_id)
+        else:
+            # Сохраняем контекст - используем async метод если доступен
+            context_dict = self._booking_fsm_service.save_context(context)
+            if hasattr(self._booking_store, 'set_async'):
+                await self._booking_store.set_async(session_id, context_dict)
+            else:
+                self._booking_store.set(session_id, context_dict)
         
         # Обновляем debug
         debug["booking_state"] = context.state.value if context.state else ""

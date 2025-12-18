@@ -45,7 +45,7 @@ async def chat_endpoint(
     session_id = payload.session_id or "anonymous"
     intent = detect_intent(payload.message, booking_entities=entities.__dict__)
 
-    if composer.has_active_booking(session_id, entities):
+    if await composer.has_active_booking(session_id, entities):
         intent = "booking_calculation"
 
     if payload.session_id:
