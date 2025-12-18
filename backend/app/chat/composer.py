@@ -1,42 +1,27 @@
 from typing import Any, TYPE_CHECKING
 
-from functools import lru_cache
-
 import logging
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import asyncpg
 
 from app.core.config import Settings, get_settings
 from app.booking.entities import BookingEntities
-from app.booking.fsm import BookingContext, BookingState, initial_booking_context
+from app.booking.fsm import BookingContext, BookingState
 from app.booking.models import BookingQuote, Guests
 from app.booking.service import BookingQuoteService
-from app.chat.formatting import (
-    detect_detail_mode,
-    format_shelter_quote,
-    format_more_offers,
-    postprocess_answer,
-    select_min_offer_per_room_type,
-)
-from app.booking.parsers import (
-    extract_guests,
-    parse_adults,
-    parse_checkin,
-    parse_children_ages,
-    parse_children_count,
-    parse_nights,
-    parse_room_type,
-)
-from app.booking.slot_filling import CHILDREN_PATTERNS, SlotFiller, SlotState
+from app.booking.slot_filling import SlotFiller, SlotState
 from app.llm.amvera_client import AmveraLLMClient
 from app.llm.prompts import FACTS_PROMPT
 from app.llm.cache import get_llm_cache
 from app.rag.context_builder import build_context
 from app.rag.qdrant_client import QdrantClient
 from app.rag.retriever import gather_rag_data
+from app.services.parsing_service import ParsedMessageCache, ParsingService
+from app.services.booking_fsm_service import BookingFsmService
+from app.services.response_formatting_service import ResponseFormattingService
 
 if TYPE_CHECKING:
     from app.session.redis_state_store import RedisConversationStateStore
@@ -70,50 +55,12 @@ class InMemoryConversationStateStore(ConversationStateStore):
         self._storage.pop(session_id, None)
 
 
-class _ParsedMessageCache:
-    """Кэширует результаты парсинга для одного сообщения пользователя."""
-
-    def __init__(self, text: str) -> None:
-        self._text = text
-
-    @property
-    def text(self) -> str:
-        return self._text
-
-    @property
-    def lowered(self) -> str:
-        return self._text.lower()
-
-    @lru_cache(maxsize=1)
-    def guests(self) -> dict[str, int]:
-        return extract_guests(self._text)
-
-    @lru_cache(maxsize=None)
-    def checkin(self, now_date: date | None = None) -> str | None:
-        return parse_checkin(self._text, now_date=now_date)
-
-    @lru_cache(maxsize=1)
-    def nights(self) -> int | None:
-        return parse_nights(self._text)
-
-    @lru_cache(maxsize=None)
-    def adults(self, allow_general_numbers: bool = True) -> int | None:
-        return parse_adults(self._text, allow_general_numbers=allow_general_numbers)
-
-    @lru_cache(maxsize=1)
-    def children_count(self) -> int | None:
-        return parse_children_count(self._text)
-
-    @lru_cache(maxsize=None)
-    def children_ages(self, expected: int | None = None) -> list[int]:
-        return parse_children_ages(self._text, expected=expected)
-
-    @lru_cache(maxsize=1)
-    def room_type(self) -> str | None:
-        return parse_room_type(self._text)
-
-
 class ChatComposer:
+    """Оркестратор для обработки сообщений чата.
+    
+    Координирует работу сервисов парсинга, FSM бронирования и форматирования ответов.
+    """
+
     def __init__(
         self,
         *,
@@ -130,12 +77,19 @@ class ChatComposer:
         self._pool = pool
         self._qdrant = qdrant
         self._llm = llm
-        self._slot_filler = slot_filler
-        self._booking_service = booking_service
         self._store = store
         self._booking_store = booking_fsm_store or store
         self._settings = settings or get_settings()
-        self._max_state_attempts = max_state_attempts
+        self._booking_service = booking_service  # Сохраняем для handle_booking
+        
+        # Инициализируем сервисы
+        self._parsing_service = ParsingService(slot_filler)
+        self._formatting_service = ResponseFormattingService()
+        self._booking_fsm_service = BookingFsmService(
+            booking_service=booking_service,
+            formatting_service=self._formatting_service,
+            max_state_attempts=max_state_attempts,
+        )
 
     def has_active_booking(
         self, session_id: str, entities: BookingEntities | None = None
@@ -158,29 +112,45 @@ class ChatComposer:
     async def handle_booking_calculation(
         self, session_id: str, text: str, entities: BookingEntities
     ) -> dict[str, Any]:
-        context = self._load_booking_context(session_id)
-        debug = self._booking_debug(context)
-        answer = await self._handle_booking_message(
-            session_id, text, context, entities, debug
+        """Обрабатывает расчёт бронирования через FSM."""
+        # Загружаем контекст
+        context_dict = self._booking_store.get(session_id)
+        context = self._booking_fsm_service.load_context(context_dict)
+        
+        # Создаём парсеры для сообщения
+        parsers = self._parsing_service.create_parsers(text)
+        
+        # Применяем сущности к контексту
+        self._parsing_service.apply_entities_to_context(context, entities)
+        self._parsing_service.apply_entities_from_message(context, parsers)
+        
+        # Подготавливаем debug информацию
+        debug = {
+            "intent": "booking_calculation",
+            "booking_state": context.state.value if context.state else "",
+            "booking_entities": self._booking_fsm_service.get_context_entities(context),
+            "missing_fields": self._booking_fsm_service.get_missing_context_fields(context),
+            "shelter_called": False,
+            "shelter_latency_ms": 0,
+            "shelter_error": None,
+            "llm_called": False,
+        }
+        
+        # Обрабатываем сообщение через FSM
+        answer = await self._booking_fsm_service.process_message(
+            session_id, text, context, parsers, debug
         )
+        
+        # Сохраняем контекст
+        context_dict = self._booking_fsm_service.save_context(context)
+        self._booking_store.set(session_id, context_dict)
+        
+        # Обновляем debug
         debug["booking_state"] = context.state.value if context.state else ""
-        debug["booking_entities"] = self._context_entities(context)
-        debug["missing_fields"] = self._missing_context_fields(context)
+        debug["booking_entities"] = self._booking_fsm_service.get_context_entities(context)
+        debug["missing_fields"] = self._booking_fsm_service.get_missing_context_fields(context)
+        
         return {"answer": answer, "debug": debug}
-
-    def _missing_booking_fields(self, state: SlotState) -> list[str]:
-        missing: list[str] = []
-        if not state.check_in:
-            missing.append("checkin")
-        if not state.check_out and not state.nights:
-            missing.append("checkout_or_nights")
-        if state.adults is None:
-            missing.append("adults")
-        if state.children is None:
-            missing.append("children")
-        if (state.children or 0) > 0 and not state.children_ages:
-            missing.append("children_ages")
-        return missing
 
     def _has_booking_context(self, state: SlotState) -> bool:
         return bool(
@@ -200,203 +170,6 @@ class ChatComposer:
             or entities.children is not None
         )
 
-    def _load_booking_context(self, session_id: str) -> BookingContext:
-        context = BookingContext.from_dict(self._booking_store.get(session_id))
-        if context is None:
-            return initial_booking_context()
-        return context
-
-    def _save_booking_context(self, session_id: str, context: BookingContext) -> None:
-        context.updated_at = datetime.utcnow().timestamp()
-        self._booking_store.set(session_id, context.to_dict())
-
-    def _parsers_for_message(self, text: str) -> _ParsedMessageCache:
-        """Создаёт кэшируемые парсеры для входящего сообщения."""
-        return _ParsedMessageCache(text)
-
-    def _booking_debug(self, context: BookingContext) -> dict[str, Any]:
-        return {
-            "intent": "booking_calculation",
-            "booking_state": context.state.value if context.state else "",
-            "booking_entities": self._context_entities(context),
-            "missing_fields": self._missing_context_fields(context),
-            "shelter_called": False,
-            "shelter_latency_ms": 0,
-            "shelter_error": None,
-            "llm_called": False,
-        }
-
-    def _context_entities(self, context: BookingContext) -> dict[str, Any]:
-        return {
-            "checkin": context.checkin,
-            "checkout": context.checkout,
-            "nights": context.nights,
-            "adults": context.adults,
-            "children": context.children,
-            "children_ages": context.children_ages,
-            "room_type": context.room_type,
-            "promo": context.promo,
-        }
-
-    def _missing_context_fields(self, context: BookingContext) -> list[str]:
-        missing: list[str] = []
-        if not context.checkin:
-            missing.append("checkin")
-        if not context.checkout and context.nights is None:
-            missing.append("checkout_or_nights")
-        if context.adults is None:
-            missing.append("adults")
-        if context.children is None:
-            missing.append("children")
-        if (context.children or 0) > 0 and not context.children_ages:
-            missing.append("children_ages")
-        return missing
-
-    async def _handle_booking_message(
-        self,
-        session_id: str,
-        text: str,
-        context: BookingContext,
-        entities: BookingEntities,
-        debug: dict[str, Any],
-    ) -> str:
-        normalized = text.strip().lower()
-        if self._is_cancel_command(normalized):
-            context.state = BookingState.CANCELLED
-            self._booking_store.clear(session_id)
-            return "Отменяю бронирование. Если понадобится помощь, напишите."
-
-        if context.state in (None, BookingState.DONE, BookingState.CANCELLED):
-            context.state = BookingState.ASK_CHECKIN
-
-        if self._is_back_command(normalized):
-            self._go_back(context)
-
-        logger.info(
-            "BOOKING_FSM state=%s ctx=%s message=%s",
-            context.state,
-            context.compact(),
-            text,
-        )
-
-        self._apply_entities_to_context(context, entities)
-        parsers = self._parsers_for_message(text)
-        self._apply_entities_from_message(context, parsers)
-
-        answer = await self._advance_booking_fsm(session_id, context, text, debug, parsers)
-        self._save_booking_context(session_id, context)
-        return answer
-
-    def _apply_entities_to_context(
-        self, context: BookingContext, entities: BookingEntities
-    ) -> None:
-        if not context.checkin:
-            context.checkin = entities.checkin
-        if not context.checkout:
-            context.checkout = entities.checkout
-        if context.nights is None:
-            context.nights = entities.nights
-        if context.adults is None:
-            context.adults = entities.adults
-        if context.children is None:
-            context.children = entities.children
-        if not context.children_ages and entities.children is not None and entities.children <= 0:
-            context.children_ages = []
-        if context.room_type is None:
-            context.room_type = entities.room_type
-
-    def _apply_entities_from_message(self, context: BookingContext, parsers: _ParsedMessageCache) -> None:
-        if not context.checkin:
-            context.checkin = parsers.checkin()
-        if context.nights is None and not context.checkout:
-            context.nights = parsers.nights()
-        if not context.checkout and context.checkin:
-            try:
-                checkin_date = date.fromisoformat(context.checkin)
-            except ValueError:
-                checkin_date = None
-            parsed_checkout = parsers.checkin(now_date=checkin_date or date.today())
-            if parsed_checkout and parsed_checkout != context.checkin:
-                try:
-                    checkout_date = date.fromisoformat(parsed_checkout)
-                except ValueError:
-                    checkout_date = None
-                if checkout_date and checkin_date and checkout_date > checkin_date:
-                    context.checkout = parsed_checkout
-        if context.adults is None:
-            allow_general_adults = context.state in {
-                BookingState.ASK_ADULTS,
-                BookingState.ASK_CHILDREN_COUNT,
-                BookingState.ASK_CHILDREN_AGES,
-                BookingState.CALCULATE,
-                BookingState.AWAITING_USER_DECISION,
-                BookingState.CONFIRM_BOOKING,
-            }
-            adults = parsers.adults(allow_general_numbers=allow_general_adults)
-            if adults is not None:
-                context.adults = adults
-        if context.children is None and context.state in {
-            BookingState.ASK_CHILDREN_COUNT,
-            BookingState.ASK_CHILDREN_AGES,
-        }:
-            context.children = parsers.children_count()
-        if (
-            (context.children or 0) > 0
-            and not context.children_ages
-            and context.state == BookingState.ASK_CHILDREN_AGES
-        ):
-            context.children_ages = parsers.children_ages(expected=context.children)
-        if context.room_type is None:
-            context.room_type = parsers.room_type()
-
-    def _ask_with_retry(self, context: BookingContext, state: BookingState, question: str) -> str:
-        attempts = context.retries.get(state.value, 0) + 1
-        context.retries[state.value] = attempts
-        return self._booking_prompt(question, context)
-
-    def _go_back(self, context: BookingContext) -> None:
-        previous = self._previous_state(context.state)
-        if previous == BookingState.ASK_CHECKIN:
-            context.checkin = None
-            context.nights = None
-            context.checkout = None
-        if previous == BookingState.ASK_NIGHTS_OR_CHECKOUT:
-            context.nights = None
-            context.checkout = None
-        if previous == BookingState.ASK_ADULTS:
-            context.adults = None
-        if previous == BookingState.ASK_CHILDREN_COUNT:
-            context.children = None
-            context.children_ages = []
-        if previous == BookingState.ASK_CHILDREN_AGES:
-            context.children_ages = []
-        if previous is not None:
-            context.state = previous
-
-    def _previous_state(self, state: BookingState | None) -> BookingState | None:
-        order = [
-            BookingState.ASK_CHECKIN,
-            BookingState.ASK_NIGHTS_OR_CHECKOUT,
-            BookingState.ASK_ADULTS,
-            BookingState.ASK_CHILDREN_COUNT,
-            BookingState.ASK_CHILDREN_AGES,
-            BookingState.CALCULATE,
-            BookingState.AWAITING_USER_DECISION,
-            BookingState.CONFIRM_BOOKING,
-        ]
-        if state in order:
-            idx = order.index(state)
-            return order[idx - 1] if idx > 0 else BookingState.ASK_CHECKIN
-        return BookingState.ASK_CHECKIN
-
-    async def _advance_booking_fsm(
-        self,
-        session_id: str,
-        context: BookingContext,
-        text: str,
-        debug: dict[str, Any],
-        parsers: _ParsedMessageCache,
-    ) -> str:
         state = context.state or BookingState.ASK_CHECKIN
         consumed_fields: set[str] = set()
         if context.nights is not None:
@@ -690,7 +463,7 @@ class ChatComposer:
         )
         
         # Сохраняем уникальные офферы в контексте для функции "покажи все"
-        unique_offers = select_min_offer_per_room_type(offers)
+        unique_offers = self._formatting_service.select_min_offer_per_room_type(offers)
         sorted_offers = sorted(unique_offers, key=lambda o: o.total_price)
         context.offers = [
             {
@@ -707,17 +480,17 @@ class ChatComposer:
         ]
         context.last_offer_index = min(3, len(sorted_offers))  # Показали первые 3
         
-        price_block = format_shelter_quote(booking_entities, offers)
+        price_block = self._formatting_service.format_booking_quote(booking_entities, offers)
         context.state = BookingState.AWAITING_USER_DECISION
         return price_block
 
     def _handle_confirmation(
-        self, text: str, context: BookingContext, parsers: _ParsedMessageCache
+        self, text: str, context: BookingContext, parsers: ParsedMessageCache
     ) -> str:
         return self._handle_post_quote_decision(text, context, parsers)
 
     def _handle_post_quote_decision(
-        self, text: str, context: BookingContext, parsers: _ParsedMessageCache
+        self, text: str, context: BookingContext, parsers: ParsedMessageCache
     ) -> str:
         normalized = text.strip().lower()
         room_type = parsers.room_type()
@@ -821,7 +594,7 @@ class ChatComposer:
                 )
             )
 
-        text, new_index = format_more_offers(offers_to_show, 0)
+        text, new_index = self._formatting_service.format_more_offers(offers_to_show, 0)
         context.last_offer_index = start_idx + new_index
         context.state = BookingState.AWAITING_USER_DECISION
         return text
@@ -948,9 +721,13 @@ class ChatComposer:
 
     async def handle_booking(self, session_id: str, text: str) -> dict[str, Any]:
         state = self._store.get(session_id) or SlotState()
-        state = self._slot_filler.extract(text, state)
-        self._apply_children_answer(text, state)
-        missing = self._slot_filler.missing_slots(state)
+        state = self._parsing_service.extract_slot_state(text, state)
+        self._parsing_service.apply_children_answer(text, state)
+        # Используем slot_filler из зависимостей
+        # TODO: передать slot_filler в ParsingService или использовать напрямую
+        from app.booking.slot_filling import SlotFiller
+        slot_filler = SlotFiller()
+        missing = slot_filler.missing_slots(state)
         self._store.set(session_id, state)
 
         next_slot = self._next_missing_slot(state)
@@ -1005,7 +782,7 @@ class ChatComposer:
             adults=state.adults or 2,
             children=state.children,
         )
-        answer = format_shelter_quote(entities, offers)
+        answer = self._formatting_service.format_booking_quote(entities, offers)
         return {
             "answer": answer,
             "debug": {
@@ -1032,7 +809,7 @@ class ChatComposer:
             intent: Определённый intent
             session_id: ID сессии для истории диалога
         """
-        detail_mode = detect_detail_mode(text)
+        detail_mode = self._formatting_service.detect_detail_mode(text)
 
         rag_hits = await gather_rag_data(
             query=text,
@@ -1108,7 +885,7 @@ class ChatComposer:
                     "Если вы загрузили описание номеров/домиков в базу — скажите 'покажи варианты из базы'."
                 )
 
-            final_answer = postprocess_answer(
+            final_answer = self._formatting_service.postprocess_answer(
                 answer, mode="detail" if detail_mode else "brief"
             )
             return {"answer": final_answer, "debug": debug}
@@ -1122,7 +899,7 @@ class ChatComposer:
                 debug["llm_called"] = False
                 if cached_debug:
                     debug.update({k: v for k, v in cached_debug.items() if k not in debug})
-                final_answer = postprocess_answer(
+                final_answer = self._formatting_service.postprocess_answer(
                     cached_answer,
                     mode="detail" if detail_mode else "brief",
                 )
@@ -1164,7 +941,7 @@ class ChatComposer:
                 rag_hits=rag_hits,
             )
             if rag_answer:
-                answer = postprocess_answer(
+                answer = self._formatting_service.postprocess_answer(
                     rag_answer, mode="detail" if detail_mode else "brief"
                 )
                 return {"answer": answer, "debug": debug}
@@ -1173,7 +950,7 @@ class ChatComposer:
                 "debug": debug,
             }
 
-        final_answer = postprocess_answer(
+        final_answer = self._formatting_service.postprocess_answer(
             answer or "Нет данных в базе знаний.",
             mode="detail" if detail_mode else "brief",
         )
