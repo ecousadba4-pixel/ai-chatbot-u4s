@@ -64,19 +64,23 @@ class DummyRequest:
         return json.dumps(self._payload).encode("utf-8")
 
 
+# NOTE: Эта функция и связанные тесты используют устаревший API.
+# Legacy модули backend.config, backend.rag, backend.conversation удалены.
+# Тесты test_chatbot.py и test_booking_dialogue.py требуют обновления для нового API.
 def load_app_module(monkeypatch):
     module_name = "backend.app"
     for key in ("AMVERA_API_TOKEN", "AMVERA_API_URL", "AMVERA_MODEL"):
         os.environ[key] = f"test-{key.lower()}"
 
-    for dependency in [module_name, "backend.config", "backend.rag"]:
-        if dependency in sys.modules:
-            del sys.modules[dependency]
+    # Удалены ссылки на backend.config и backend.rag (legacy модули)
+    if module_name in sys.modules:
+        del sys.modules[module_name]
 
     app_mod = importlib.import_module(module_name)
     importlib.reload(app_mod)
 
-    dummy_client = DummyClient(app_mod.CONFIG)
-    monkeypatch.setattr(app_mod, "CLIENT", dummy_client)
+    # Эти атрибуты больше не существуют в новом API
+    # dummy_client = DummyClient(app_mod.CONFIG)
+    # monkeypatch.setattr(app_mod, "CLIENT", dummy_client)
 
     return app_mod

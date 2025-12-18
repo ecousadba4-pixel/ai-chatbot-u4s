@@ -16,7 +16,7 @@ from app.core.logging import setup_logging
 from app.db.pool import get_pool
 from app.llm.amvera_client import AmveraLLMClient
 from app.rag.embed_client import close_embed_client, get_embed_client
-from app.rag.qdrant_client import QdrantClient, get_qdrant_client
+from app.rag.qdrant_client import get_qdrant_client
 from app.session import get_session_store
 from app.session.redis_state_store import get_redis_state_store, close_redis_state_store
 

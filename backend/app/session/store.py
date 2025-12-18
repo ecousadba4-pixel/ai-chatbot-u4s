@@ -4,6 +4,8 @@ import json
 from functools import lru_cache
 from typing import Any
 
+import redis.asyncio as redis
+
 from app.core.config import get_settings
 from app.session.redis_client import get_redis_client
 
