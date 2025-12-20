@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import suppress
 
 from fastapi import Depends, FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -232,6 +234,25 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
 def create_app() -> FastAPI:
     app = FastAPI(title="U4S Chat API", lifespan=lifespan)
     api_prefix = settings.api_prefix
+
+    # Настройка CORS
+    allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if allowed_origins_str:
+        # Парсим CSV список origins с безопасной очисткой
+        allowed_origins = [
+            origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()
+        ]
+    else:
+        # Если переменная не задана, разрешаем все origins
+        allowed_origins = ["*"]
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],  # Включает OPTIONS
+        allow_headers=["*"],  # Включает content-type и x-api-key
+    )
 
     # Добавляем Prometheus middleware
     app.add_middleware(PrometheusMiddleware)

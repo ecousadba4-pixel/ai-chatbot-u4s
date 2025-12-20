@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 
-async def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
+async def verify_api_key(
+    request: Request,
+    x_api_key: str | None = Header(default=None)
+) -> None:
+    # Пропускаем OPTIONS запросы (preflight) - они обрабатываются CORS middleware
+    if request.method == "OPTIONS":
+        return
+    
     if not x_api_key:
         return
     # Хук для будущего подключения авторизации. Пока пропускаем все ключи.
