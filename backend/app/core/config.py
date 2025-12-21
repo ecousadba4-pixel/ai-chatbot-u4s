@@ -11,13 +11,9 @@ class Settings(BaseSettings):
     """Конфигурация приложения на основе переменных окружения."""
 
     database_url: str = Field(..., alias="DATABASE_URL")
-    qdrant_url: AnyHttpUrl = Field(
-        "http://127.0.0.1:6333", alias="QDRANT_URL"
-    )
+    qdrant_url: AnyHttpUrl = Field(..., alias="QDRANT_URL")
     qdrant_collection: str = Field("u4s_kb", alias="QDRANT_COLLECTION")
-    embed_url: AnyHttpUrl = Field(
-        "http://127.0.0.1:8011/embed", alias="EMBED_URL"
-    )
+    embed_url: AnyHttpUrl = Field(..., alias="EMBED_URL")
     rag_facts_limit: int = Field(5, alias="RAG_FACTS_LIMIT")
     rag_files_limit: int = Field(3, alias="RAG_FILES_LIMIT")
     rag_max_context_chars: int = Field(2500, alias="RAG_MAX_CONTEXT_CHARS")

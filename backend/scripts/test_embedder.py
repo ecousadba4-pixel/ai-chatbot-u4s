@@ -7,17 +7,17 @@ import json
 
 import httpx
 
-
-EMBED_URL = "http://127.0.0.1:8011/embed"
+from app.core.config import get_settings
 
 
 async def main() -> None:
+    settings = get_settings()
     payload = {"texts": ["тест"]}
     timeout = httpx.Timeout(connect=2.0, read=5.0)
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(EMBED_URL, json=payload)
+            response = await client.post(str(settings.embed_url), json=payload)
             response.raise_for_status()
             data = response.json()
     except Exception as exc:  # noqa: BLE001
